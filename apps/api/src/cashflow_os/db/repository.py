@@ -713,19 +713,24 @@ class PostgresRepository:
     # ------------------------------------------------------------------
 
     def seed_demo(self) -> None:
-        with get_db_session() as session:
-            row = session.execute(
-                text("SELECT COUNT(*) as cnt FROM cashflow.forecast_runs"),
-            ).mappings().first()
-            if row and row["cnt"] > 0:
-                return
+        try:
+            with get_db_session() as session:
+                row = session.execute(
+                    text("SELECT COUNT(*) as cnt FROM cashflow.forecast_runs"),
+                ).mappings().first()
+                if row and row["cnt"] > 0:
+                    return
 
-        from cashflow_os.api.store import build_demo_forecast_input
-        demo_input = build_demo_forecast_input()
-        demo_run = build_forecast_run(demo_input)
-        demo_report = build_report_pack(demo_run)
-        self.upsert_forecast_run(demo_run, demo_input)
-        self.upsert_report(demo_report)
+            from cashflow_os.api.store import build_demo_forecast_input
+            demo_input = build_demo_forecast_input()
+            from cashflow_os.forecast.engine import build_forecast_run
+            from cashflow_os.reports.builder import build_report_pack
+            demo_run = build_forecast_run(demo_input)
+            demo_report = build_report_pack(demo_run)
+            self.upsert_forecast_run(demo_run, demo_input)
+            self.upsert_report(demo_report)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Listing helpers for API

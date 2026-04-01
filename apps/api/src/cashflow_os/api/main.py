@@ -281,11 +281,21 @@ def _update_desktop_agent_activity(
     STORE.upsert_desktop_agent(agent)
 
 
+@app.get("/")
+def root():
+    return {
+        "app": "India Cashflow OS API",
+        "status": "online",
+        "message": "API is running. Use /v1 endpoints."
+    }
+
+
 @app.get("/health")
 def health() -> dict:
     backend = "postgresql" if is_postgres_available() else "in_memory"
     db_ok = db_health_check() if is_postgres_available() else True
     return {"status": "ok" if db_ok else "degraded", "backend": backend, "database_connected": db_ok}
+
 
 
 @app.get("/v1/auth/session")

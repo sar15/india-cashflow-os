@@ -1,0 +1,14 @@
+.venv
+venv
+node_modules
+.next
+.git
+tests
+data
+__pycache__
+*.pyc
+.pytest_cache
+apps/desktop_agent
+logs
+coverage
+.cursor

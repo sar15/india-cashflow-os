@@ -1,0 +1,8 @@
+name,obligation_type,frequency,amount_inr,due_day,start_date
+Payroll,payroll,monthly,360000,1,2026-04-01
+GST,gst,monthly,220000,20,2026-04-01
+TDS,tds,monthly,65000,7,2026-04-01
+EPF,epf,monthly,40000,15,2026-04-01
+EMI,emi,monthly,110000,5,2026-04-01
+Rent,rent,monthly,140000,5,2026-04-01
+

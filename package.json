@@ -1,0 +1,16 @@
+{
+  "name": "india-cashflow-os",
+  "private": true,
+  "workspaces": [
+    "apps/web"
+  ],
+  "scripts": {
+    "dev:web": "npm --workspace apps/web run dev",
+    "build:web": "npm --workspace apps/web run build",
+    "lint:web": "npm --workspace apps/web run lint",
+    "test:api": "cd apps/api && PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_*.py'",
+    "local:infra:up": "docker compose -f compose.local.yml up -d",
+    "local:infra:down": "docker compose -f compose.local.yml down",
+    "agent:desktop": "python3 apps/desktop_agent/main.py"
+  }
+}

@@ -1,0 +1,7 @@
+event_type,entity_type,counterparty,document_number,document_date,due_date,expected_cash_date,gross_amount_inr,tax_amount_inr,tds_amount_inr,is_msme,status,notes
+inflow,invoice,Sharma Retail,INV-2026-041,2026-03-25,2026-04-08,,1200000,0,0,false,open,Major customer invoice
+inflow,invoice,Delta Foods,INV-2026-052,2026-03-28,2026-04-18,,850000,0,8500,false,open,Customer typically pays late
+outflow,bill,Apex Steel,BILL-STEEL-019,2026-03-01,2026-04-20,,900000,0,0,true,open,MSME vendor bill
+outflow,bill,Universal Packaging,BILL-PACK-028,2026-03-30,2026-04-14,,475000,0,0,false,open,Packaging payable
+outflow,manual,,UTILITY-APR,2026-04-09,2026-04-09,2026-04-09,85000,0,0,false,planned,Utilities and plant maintenance
+

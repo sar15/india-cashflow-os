@@ -1,0 +1,26 @@
+.DS_Store
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+node_modules/
+.next/
+dist/
+coverage/
+*.log
+tmp/
+exports/
+
+# Runtime state and generated report files
+data/cashflow-os-state.json
+data/report-files/
+
+# Environment files (secrets)
+apps/api/.env
+apps/web/.env.local
+apps/desktop_agent/.env
+.cashflow-desktop-agent/
+
+# Platform
+.vercel

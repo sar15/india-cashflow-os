@@ -1,0 +1,18 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "npm run build:web",
+  "outputDirectory": "apps/web/.next",
+  "framework": "nextjs",
+  "rewrites": [
+    {
+      "source": "/backend/:path*",
+      "destination": "/api/:path*"
+    }
+  ],
+  "functions": {
+    "api/**/*.py": {
+      "runtime": "@vercel/python@4.5.0",
+      "maxDuration": 60
+    }
+  }
+}

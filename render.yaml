@@ -1,0 +1,49 @@
+services:
+  - type: web
+    name: cashflow-os-api
+    runtime: python
+    region: oregon
+    plan: free
+    rootDir: apps/api
+    buildCommand: pip install -r requirements.txt
+    startCommand: python3 -m uvicorn --app-dir src cashflow_os.api.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: CASHFLOW_ALLOWED_ORIGINS
+        sync: false
+      - key: CASHFLOW_STORAGE_BACKEND
+        value: local
+      - key: CASHFLOW_LOG_LEVEL
+        value: INFO
+      - key: CASHFLOW_DISABLE_DEMO_AUTH
+        value: "0"
+      - key: CASHFLOW_AUTH_TOKENS_JSON
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+    healthCheckPath: /health
+
+  - type: web
+    name: cashflow-os-web
+    runtime: node
+    region: oregon
+    plan: free
+    rootDir: apps/web
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: API_BASE_URL
+        sync: false
+      - key: API_AUTH_TOKEN
+        sync: false
+      - key: NEXT_PUBLIC_API_BASE_URL
+        sync: false
+      - key: CASHFLOW_SESSION_SECRET
+        sync: false
+      - key: CASHFLOW_DISABLE_DEMO_USERS
+        value: "1"
+      - key: CASHFLOW_WEB_USERS_JSON
+        sync: false

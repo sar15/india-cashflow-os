@@ -1,14 +1,15 @@
-"""Tests for Zoho contact fetching and MSME enrichment.
+"""Tests for MSME detection from contact metadata.
 
 Validates the counterparty enrichment pipeline that detects
-MSME status from Zoho Books contact metadata, custom fields,
-and notes.
+MSME status from contact custom fields, notes, and company names.
+Relocated from test_zoho_contacts.py after MSME logic was moved
+to utils/msme.py.
 """
 
 import pytest
 
-from cashflow_os.ingestion.zoho_client import (
-    _is_msme_from_contact,
+from cashflow_os.utils.msme import (
+    is_msme_from_contact,
     enrich_counterparties_from_contacts,
 )
 
@@ -22,7 +23,7 @@ class TestIsMSMEFromContact:
                 {"label": "MSME Registered", "value": "Yes"},
             ],
         }
-        assert _is_msme_from_contact(contact) is True
+        assert is_msme_from_contact(contact) is True
 
     def test_custom_field_false(self):
         contact = {
@@ -31,7 +32,7 @@ class TestIsMSMEFromContact:
                 {"label": "MSME Registered", "value": "No"},
             ],
         }
-        assert _is_msme_from_contact(contact) is False
+        assert is_msme_from_contact(contact) is False
 
     def test_udyam_in_notes(self):
         contact = {
@@ -39,7 +40,7 @@ class TestIsMSMEFromContact:
             "notes": "UDYAM-MH-01-0012345, registered 2024",
             "custom_fields": [],
         }
-        assert _is_msme_from_contact(contact) is True
+        assert is_msme_from_contact(contact) is True
 
     def test_msme_in_company_name(self):
         contact = {
@@ -47,21 +48,21 @@ class TestIsMSMEFromContact:
             "company_name": "MSME Vendor Pvt Ltd",
             "custom_fields": [],
         }
-        assert _is_msme_from_contact(contact) is True
+        assert is_msme_from_contact(contact) is True
 
     def test_no_msme_indicators(self):
         contact = {
             "contact_name": "Normal Vendor",
             "custom_fields": [],
         }
-        assert _is_msme_from_contact(contact) is False
+        assert is_msme_from_contact(contact) is False
 
     def test_empty_custom_fields(self):
         contact = {
             "contact_name": "Test",
             "custom_fields": None,
         }
-        assert _is_msme_from_contact(contact) is False
+        assert is_msme_from_contact(contact) is False
 
     def test_custom_field_registered_value(self):
         contact = {
@@ -70,7 +71,7 @@ class TestIsMSMEFromContact:
                 {"label": "Is MSME", "value": "Registered"},
             ],
         }
-        assert _is_msme_from_contact(contact) is True
+        assert is_msme_from_contact(contact) is True
 
     def test_udyam_label_field(self):
         contact = {
@@ -79,7 +80,7 @@ class TestIsMSMEFromContact:
                 {"label": "Udyam Registered", "value": "true"},
             ],
         }
-        assert _is_msme_from_contact(contact) is True
+        assert is_msme_from_contact(contact) is True
 
 
 class TestEnrichCounterpartiesFromContacts:

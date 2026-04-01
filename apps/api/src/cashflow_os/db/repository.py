@@ -24,8 +24,6 @@ from cashflow_os.domain.models import (
     BankBalanceSnapshot,
     CanonicalCashEvent,
     Counterparty,
-    DesktopAgentRecord,
-    DesktopAgentStatus,
     EntityType,
     EventType,
     EventStatus,
@@ -41,7 +39,6 @@ from cashflow_os.domain.models import (
     ReportPack,
     ScenarioKind,
     SourceType,
-    SourceConnectionRecord,
 )
 from cashflow_os.forecast.engine import build_forecast_run
 from cashflow_os.reports.builder import build_report_pack
@@ -614,99 +611,10 @@ class PostgresRepository:
     def read_report_file(self, report_id: str, file_format: str) -> Optional[bytes]:
         return self.report_file_cache.get(report_id, {}).get(file_format)
 
-    # ------------------------------------------------------------------
-    # Source Connections
-    # ------------------------------------------------------------------
-
-    def upsert_source_connection(self, connection: SourceConnectionRecord) -> None:
-        with get_db_session() as session:
-            session.execute(
-                text("""
-                    INSERT INTO cashflow.source_connections
-                        (connection_id, org_id, source_type, client_name, status,
-                         redirect_uri, token_payload, remote_org_id, remote_org_name)
-                    VALUES (:id, :org_id, :type, :name, :status,
-                            :redirect, :token::jsonb, :remote_id, :remote_name)
-                    ON CONFLICT (connection_id) DO UPDATE SET
-                        status = EXCLUDED.status,
-                        token_payload = EXCLUDED.token_payload,
-                        remote_org_id = EXCLUDED.remote_org_id,
-                        remote_org_name = EXCLUDED.remote_org_name,
-                        updated_at = now()
-                """),
-                {
-                    "id": connection.connection_id,
-                    "org_id": connection.org_id,
-                    "type": connection.source_type.value,
-                    "name": connection.client_name,
-                    "status": connection.status,
-                    "redirect": connection.redirect_uri,
-                    "token": json.dumps(connection.token_payload) if connection.token_payload else None,
-                    "remote_id": connection.remote_org_id,
-                    "remote_name": connection.remote_org_name,
-                },
-            )
-
-    def register_oauth_state(self, connection_id: str, state: str) -> None:
-        with get_db_session() as session:
-            session.execute(
-                text("INSERT INTO cashflow.oauth_states (state, connection_id) VALUES (:state, :id)"),
-                {"state": state, "id": connection_id},
-            )
-
-    def consume_oauth_state(self, state: str) -> Optional[str]:
-        with get_db_session() as session:
-            row = session.execute(
-                text("DELETE FROM cashflow.oauth_states WHERE state = :state RETURNING connection_id"),
-                {"state": state},
-            ).mappings().first()
-            return row["connection_id"] if row else None
-
-    def upsert_source_token(self, connection_id: str, token_payload: dict) -> None:
-        with get_db_session() as session:
-            session.execute(
-                text("UPDATE cashflow.source_connections SET token_payload = :token::jsonb, updated_at = now() WHERE connection_id = :id"),
-                {"token": json.dumps(token_payload), "id": connection_id},
-            )
-
-    def get_source_token(self, connection_id: str) -> Optional[dict]:
-        with get_db_session() as session:
-            row = session.execute(
-                text("SELECT token_payload FROM cashflow.source_connections WHERE connection_id = :id"),
-                {"id": connection_id},
-            ).mappings().first()
-            if row is None or row["token_payload"] is None:
-                return None
-            payload = row["token_payload"]
-            return json.loads(payload) if isinstance(payload, str) else dict(payload)
 
     # ------------------------------------------------------------------
-    # Desktop Agents
+    # Listing helpers for API
     # ------------------------------------------------------------------
-
-    def upsert_desktop_agent(self, agent: DesktopAgentRecord) -> None:
-        with get_db_session() as session:
-            session.execute(
-                text("""
-                    INSERT INTO cashflow.desktop_agents
-                        (agent_id, org_id, machine_name, status, watched_path, last_heartbeat_at, last_message)
-                    VALUES (:id, :org_id, :machine, :status, :path, :heartbeat, :msg)
-                    ON CONFLICT (agent_id) DO UPDATE SET
-                        status = EXCLUDED.status,
-                        watched_path = EXCLUDED.watched_path,
-                        last_heartbeat_at = EXCLUDED.last_heartbeat_at,
-                        last_message = EXCLUDED.last_message
-                """),
-                {
-                    "id": agent.agent_id,
-                    "org_id": agent.org_id,
-                    "machine": agent.machine_name,
-                    "status": agent.status.value,
-                    "path": agent.watched_path,
-                    "heartbeat": agent.last_heartbeat_at,
-                    "msg": agent.last_message,
-                },
-            )
 
     # ------------------------------------------------------------------
     # Seed demo data
@@ -773,27 +681,7 @@ class PostgresRepository:
             ).mappings().all()
             return {row["scenario_id"]: ForecastScenario.model_validate(dict(row)) for row in rows}
 
-    @property
-    def source_connections(self) -> Dict[str, SourceConnectionRecord]:
-        with get_db_session() as session:
-            rows = session.execute(
-                text("SELECT * FROM cashflow.source_connections ORDER BY created_at DESC LIMIT 50"),
-            ).mappings().all()
-            result = {}
-            for row in rows:
-                row_dict = dict(row)
-                if isinstance(row_dict.get("token_payload"), str):
-                    row_dict["token_payload"] = json.loads(row_dict["token_payload"])
-                result[row["connection_id"]] = SourceConnectionRecord.model_validate(row_dict)
-            return result
 
-    @property
-    def desktop_agents(self) -> Dict[str, DesktopAgentRecord]:
-        with get_db_session() as session:
-            rows = session.execute(
-                text("SELECT * FROM cashflow.desktop_agents ORDER BY created_at DESC LIMIT 50"),
-            ).mappings().all()
-            return {row["agent_id"]: DesktopAgentRecord.model_validate(dict(row)) for row in rows}
 
     @property
     def forecast_inputs(self) -> Dict[str, ForecastInput]:

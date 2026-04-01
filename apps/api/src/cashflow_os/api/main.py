@@ -1,8 +1,8 @@
+import asyncio
 import hashlib
 import json
 import logging
 import os
-import secrets
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -10,17 +10,15 @@ from typing import Optional, Union
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 
 from cashflow_os.api.auth import AuthPrincipal, ensure_org_access, require_roles
 from cashflow_os.api.schemas import (
     ConfirmImportPayload,
-    DesktopAgentHeartbeatRequest,
-    DesktopAgentRegistrationRequest,
     ImportCreatePayload,
     ObligationSetupPayload,
     ScenarioSetupPayload,
-    ZohoConnectRequest,
-    ZohoExchangeRequest,
 )
 from cashflow_os.api.store import InMemoryStore
 from cashflow_os.db.engine import dispose_engine, get_database_url, health_check as db_health_check, init_engine, is_postgres_available
@@ -29,8 +27,6 @@ from cashflow_os.domain.models import (
     BankBalanceSnapshot,
     ChartTraceResponse,
     DashboardResponse,
-    DesktopAgentRecord,
-    DesktopAgentStatus,
     EntityType,
     ForecastInput,
     ForecastScenario,
@@ -40,24 +36,11 @@ from cashflow_os.domain.models import (
     RecurringObligation,
     ReportRequest,
     ScenarioKind,
-    SourceConnectionRecord,
-    SourceConnectionStatus,
     SourceType,
     utc_now,
 )
 from cashflow_os.forecast.engine import build_forecast_run, build_standard_scenario_runs
-from cashflow_os.ingestion.service import parse_import
-from cashflow_os.ingestion.zoho_client import (
-    ZohoApiError,
-    ZohoConfigurationError,
-    build_zoho_authorization_url,
-    choose_default_organization,
-    exchange_zoho_authorization_code,
-    fetch_zoho_import_payload,
-    list_zoho_organizations,
-    refresh_zoho_access_token,
-    token_is_expired,
-)
+from cashflow_os.ingestion.service import FileParseError, parse_import
 from cashflow_os.reports.builder import build_report_pack
 from cashflow_os.reports.exporters import export_excel, export_pdf
 from cashflow_os.reports.traces import resolve_report_chart_trace
@@ -72,6 +55,7 @@ STORE: Union[InMemoryStore, PostgresRepository] = InMemoryStore()
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     global STORE
+    application.state.upload_semaphore = asyncio.Semaphore(3)
     database_url = get_database_url()
     if database_url:
         LOGGER.info("DATABASE_URL detected — initializing PostgreSQL backend.")
@@ -112,6 +96,16 @@ async def log_requests(request: Request, call_next):
     duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
     LOGGER.info("%s %s -> %s in %sms", request.method, request.url.path, response.status_code, duration_ms)
     return response
+
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    # Prevents default FastAPI 500 handler from leaking stack traces and PII
+    LOGGER.exception("Unhandled exception on %s %s", request.method, request.url.path)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal Server Error"},
+    )
 
 
 def _build_demo_bundle() -> ParsedImportBundle:
@@ -239,46 +233,7 @@ def _build_manual_obligations(org_id: str, payload: list[ObligationSetupPayload]
     return obligations
 
 
-def _resolve_zoho_redirect_uri(explicit_redirect_uri: Optional[str], metadata: Optional[dict] = None) -> Optional[str]:
-    return explicit_redirect_uri or (metadata or {}).get("redirect_uri") or os.getenv("ZOHO_REDIRECT_URI")
 
-
-def _configured_for_live_zoho(redirect_uri: Optional[str]) -> bool:
-    return bool(os.getenv("ZOHO_CLIENT_ID") and os.getenv("ZOHO_CLIENT_SECRET") and redirect_uri)
-
-
-def _update_desktop_agent_activity(
-    *,
-    desktop_agent_id: Optional[str],
-    org_id: str,
-    watched_path: Optional[str] = None,
-    last_uploaded_at: Optional[datetime] = None,
-    last_upload_filename: Optional[str] = None,
-    last_upload_batch_id: Optional[str] = None,
-    message: Optional[str] = None,
-) -> None:
-    if not desktop_agent_id:
-        return
-
-    agent = STORE.desktop_agents.get(desktop_agent_id)
-    if agent is None:
-        raise HTTPException(status_code=404, detail="Desktop agent not found")
-    if agent.org_id != org_id:
-        raise HTTPException(status_code=403, detail="Desktop agent does not belong to this organization")
-
-    agent.status = DesktopAgentStatus.ONLINE
-    agent.last_seen_at = utc_now()
-    if watched_path:
-        agent.watched_path = watched_path
-    if last_uploaded_at is not None:
-        agent.last_uploaded_at = last_uploaded_at
-    if last_upload_filename:
-        agent.last_upload_filename = last_upload_filename
-    if last_upload_batch_id:
-        agent.last_upload_batch_id = last_upload_batch_id
-    if message is not None:
-        agent.message = message
-    STORE.upsert_desktop_agent(agent)
 
 
 @app.get("/")
@@ -310,76 +265,116 @@ async def create_import(
     org_id: Optional[str] = Form(default=None),
     source_type: Optional[str] = Form(default=None),
     source_hint: Optional[str] = Form(default=None),
-    desktop_agent_id: Optional[str] = Form(default=None),
     principal: AuthPrincipal = Depends(require_roles("owner", "finance_manager", "accountant")),
 ):
-    if file is not None:
-        payload_org_id = org_id or principal.org_id
-        ensure_org_access(principal, payload_org_id)
-        resolved_source_type = SourceType(source_type or "manual")
-        file_bytes = await file.read()
-        checksum = _compute_import_checksum(
-            resolved_source_type,
-            file_bytes=file_bytes,
-            source_hint=source_hint,
-        )
-        existing_bundle = STORE.find_import_by_checksum(payload_org_id, resolved_source_type, checksum)
-        if existing_bundle is not None:
-            _update_desktop_agent_activity(
-                desktop_agent_id=desktop_agent_id,
-                org_id=payload_org_id,
-                last_uploaded_at=utc_now(),
-                last_upload_filename=file.filename,
-                last_upload_batch_id=existing_bundle.import_batch.import_batch_id,
-                message="Desktop sync bridge uploaded a duplicate file and the API reused the existing import batch.",
-            )
-            return existing_bundle
-        bundle = parse_import(
-            org_id=payload_org_id,
-            source_type=resolved_source_type,
-            filename=file.filename,
-            file_bytes=file_bytes,
-            source_hint=source_hint,
-        )
-        bundle.import_batch.checksum = checksum
-    else:
-        payload = ImportCreatePayload.model_validate(await request.json())
-        payload_org_id = payload.org_id or principal.org_id
-        ensure_org_access(principal, payload_org_id)
-        if payload.use_demo:
-            bundle = _build_demo_bundle()
-        else:
-            resolved_source_type = SourceType(payload.source_type)
+    MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB
+    ALLOWED_EXTENSIONS = {".csv", ".xlsx", ".xls", ".xml", ".json"}
+
+    upload_semaphore = getattr(request.app.state, "upload_semaphore", None)
+    if not upload_semaphore:
+        # Fallback for tests if lifespan wasn't fully mocked
+        upload_semaphore = asyncio.Semaphore(3)
+
+    async with upload_semaphore:
+        if file is not None:
+            # --- Extension validation (more reliable than browser MIME) ---
+            filename = file.filename or "upload"
+            ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+            if ext not in ALLOWED_EXTENSIONS:
+                raise HTTPException(
+                    status_code=415,
+                    detail="Unsupported file type '{ext}'. Accepted formats: {allowed}.".format(
+                        ext=ext, allowed=", ".join(sorted(ALLOWED_EXTENSIONS))
+                    ),
+                )
+
+            payload_org_id = org_id or principal.org_id
+            ensure_org_access(principal, payload_org_id)
+            resolved_source_type = SourceType(source_type or "manual")
+            file_bytes = await file.read()
+
+            # --- Size validation (after read so we get actual bytes) ---
+            if len(file_bytes) > MAX_UPLOAD_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail="File is too large ({size_mb:.1f} MB). Maximum allowed size is {limit_mb} MB.".format(
+                        size_mb=len(file_bytes) / (1024 * 1024),
+                        limit_mb=MAX_UPLOAD_BYTES // (1024 * 1024),
+                    ),
+                )
+
             checksum = _compute_import_checksum(
                 resolved_source_type,
-                file_text=payload.text_content,
-                payload=payload.payload,
-                source_hint=payload.source_hint,
+                file_bytes=file_bytes,
+                source_hint=source_hint,
             )
-            existing_bundle = STORE.find_import_by_checksum(payload_org_id, resolved_source_type, checksum)
+            existing_bundle = await run_in_threadpool(STORE.find_import_by_checksum, payload_org_id, resolved_source_type, checksum)
             if existing_bundle is not None:
                 return existing_bundle
-            bundle = parse_import(
-                org_id=payload_org_id,
-                source_type=resolved_source_type,
-                filename=payload.filename,
-                file_text=payload.text_content,
-                payload=payload.payload,
-                source_hint=payload.source_hint,
-            )
+            try:
+                bundle = await run_in_threadpool(
+                    parse_import,
+                    org_id=payload_org_id,
+                    source_type=resolved_source_type,
+                    filename=file.filename,
+                    file_bytes=file_bytes,
+                    source_hint=source_hint,
+                )
+            except FileParseError as parse_err:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "message": str(parse_err),
+                        "error_code": "parse_error",
+                        "filename": parse_err.filename,
+                        "row": parse_err.row_number,
+                        "column": parse_err.column_name,
+                    },
+                )
             bundle.import_batch.checksum = checksum
+        else:
+            payload = ImportCreatePayload.model_validate(await request.json())
+            payload_org_id = payload.org_id or principal.org_id
+            ensure_org_access(principal, payload_org_id)
+            if payload.use_demo:
+                bundle = _build_demo_bundle()
+            else:
+                resolved_source_type = SourceType(payload.source_type)
+                checksum = _compute_import_checksum(
+                    resolved_source_type,
+                    file_text=payload.text_content,
+                    payload=payload.payload,
+                    source_hint=payload.source_hint,
+                )
+                existing_bundle = await run_in_threadpool(STORE.find_import_by_checksum, payload_org_id, resolved_source_type, checksum)
+                if existing_bundle is not None:
+                    return existing_bundle
+                try:
+                    bundle = await run_in_threadpool(
+                        parse_import,
+                        org_id=payload_org_id,
+                        source_type=resolved_source_type,
+                        filename=payload.filename,
+                        file_text=payload.text_content,
+                        payload=payload.payload,
+                        source_hint=payload.source_hint,
+                    )
+                except FileParseError as parse_err:
+                    raise HTTPException(
+                        status_code=400,
+                        detail={
+                            "message": str(parse_err),
+                            "error_code": "parse_error",
+                            "filename": parse_err.filename,
+                            "row": parse_err.row_number,
+                            "column": parse_err.column_name,
+                        },
+                    )
+                bundle.import_batch.checksum = checksum
 
-    ensure_org_access(principal, bundle.import_batch.org_id)
-    STORE.upsert_import(bundle)
-    _update_desktop_agent_activity(
-        desktop_agent_id=desktop_agent_id,
-        org_id=bundle.import_batch.org_id,
-        last_uploaded_at=utc_now(),
-        last_upload_filename=bundle.import_batch.filename,
-        last_upload_batch_id=bundle.import_batch.import_batch_id,
-        message="Desktop sync bridge uploaded the latest file successfully.",
-    )
-    return bundle
+        ensure_org_access(principal, bundle.import_batch.org_id)
+        await run_in_threadpool(STORE.upsert_import, bundle)
+        return bundle
 
 
 @app.get("/v1/imports/{import_batch_id}", response_model=ParsedImportBundle)
@@ -392,6 +387,82 @@ def get_import(
         raise HTTPException(status_code=404, detail="Import batch not found")
     ensure_org_access(principal, bundle.import_batch.org_id)
     return bundle
+
+
+@app.get("/v1/templates/cashflow-os-template.xlsx")
+def download_template():
+    """Generate and serve the standard Cashflow OS import template.
+
+    Includes Setup, Cash Events, and Obligations sheets with 2 sample rows
+    so users understand expected date and number formats.
+    """
+    from io import BytesIO
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+
+    wb = Workbook()
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill(start_color="1A5276", end_color="1A5276", fill_type="solid")
+
+    # --- Setup sheet ---
+    setup = wb.active
+    setup.title = "Setup"
+    setup_headers = ["key", "value"]
+    setup.append(setup_headers)
+    for cell in setup[1]:
+        cell.font = header_font
+        cell.fill = header_fill
+    setup.append(["opening_cash_inr", 1500000])
+    setup.append(["as_of_date", "2026-04-01"])
+    setup.column_dimensions["A"].width = 20
+    setup.column_dimensions["B"].width = 20
+
+    # --- Cash Events sheet ---
+    events = wb.create_sheet("Cash Events")
+    event_headers = [
+        "event_type", "entity_type", "counterparty", "document_number",
+        "document_date", "due_date", "expected_cash_date",
+        "gross_amount_inr", "tax_amount_inr", "tds_amount_inr",
+        "is_msme", "status", "notes",
+    ]
+    events.append(event_headers)
+    for cell in events[1]:
+        cell.font = header_font
+        cell.fill = header_fill
+    events.append([
+        "inflow", "invoice", "Sharma Retail", "INV-2026-001",
+        "2026-04-01", "2026-04-15", "",
+        1200000, 0, 0, "false", "open", "Sample customer invoice",
+    ])
+    events.append([
+        "outflow", "bill", "Apex Steel", "BILL-2026-001",
+        "2026-04-02", "2026-04-20", "",
+        900000, 0, 0, "true", "open", "Sample MSME vendor bill",
+    ])
+    for col_letter in "ABCDEFGHIJKLM":
+        events.column_dimensions[col_letter].width = 18
+
+    # --- Obligations sheet ---
+    obligations = wb.create_sheet("Obligations")
+    obligation_headers = [
+        "name", "obligation_type", "frequency", "amount_inr", "due_day", "start_date",
+    ]
+    obligations.append(obligation_headers)
+    for cell in obligations[1]:
+        cell.font = header_font
+        cell.fill = header_fill
+    obligations.append(["GST Payment", "gst", "monthly", 250000, 20, "2026-04-01"])
+    obligations.append(["Office Rent", "rent", "monthly", 150000, 5, "2026-04-01"])
+    for col_letter in "ABCDEF":
+        obligations.column_dimensions[col_letter].width = 18
+
+    buffer = BytesIO()
+    wb.save(buffer)
+    return Response(
+        content=buffer.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="cashflow-os-template.xlsx"'},
+    )
 
 
 @app.post("/v1/imports/{import_batch_id}/confirm-mapping", response_model=ForecastInput)
@@ -443,213 +514,7 @@ def create_obligation(
     return obligation
 
 
-@app.post("/v1/sources/zoho/connect", response_model=SourceConnectionRecord)
-def connect_zoho(
-    request: ZohoConnectRequest,
-    principal: AuthPrincipal = Depends(require_roles("owner", "finance_manager")),
-) -> SourceConnectionRecord:
-    ensure_org_access(principal, request.org_id)
-    redirect_uri = _resolve_zoho_redirect_uri(request.redirect_uri)
-    connection = SourceConnectionRecord(
-        org_id=request.org_id,
-        source_type=SourceType.ZOHO,
-        client_name=request.client_name,
-        status=SourceConnectionStatus.PENDING,
-        capabilities=["json_payload_ingestion"],
-        metadata={"redirect_uri": redirect_uri} if redirect_uri else {},
-    )
-    if _configured_for_live_zoho(redirect_uri):
-        oauth_state = secrets.token_urlsafe(32)
-        connection.auth_url = build_zoho_authorization_url(oauth_state, redirect_uri or "")
-        connection.capabilities.extend(["live_oauth", "remote_sync"])
-        connection.message = "Zoho authorization is ready. Redirect the user to the returned auth_url to complete the connection."
-    else:
-        connection.capabilities.append("oauth_configuration_required")
-        connection.message = "Zoho payload ingestion is ready. Set ZOHO_CLIENT_ID, ZOHO_CLIENT_SECRET, and ZOHO_REDIRECT_URI to enable live OAuth."
-    STORE.upsert_source_connection(connection)
-    if _configured_for_live_zoho(redirect_uri):
-        STORE.register_oauth_state(connection.connection_id, oauth_state)
-    return connection
 
-
-@app.post("/v1/sources/zoho/exchange", response_model=SourceConnectionRecord)
-def exchange_zoho_connection(
-    request: ZohoExchangeRequest,
-    principal: AuthPrincipal = Depends(require_roles("owner", "finance_manager")),
-) -> SourceConnectionRecord:
-    connection = STORE.source_connections.get(request.connection_id)
-    if connection is None or connection.source_type != SourceType.ZOHO:
-        raise HTTPException(status_code=404, detail="Zoho connection not found")
-    ensure_org_access(principal, connection.org_id)
-
-    resolved_connection_id = STORE.consume_oauth_state(request.state)
-    if resolved_connection_id != connection.connection_id:
-        raise HTTPException(status_code=400, detail="Zoho OAuth state is invalid or expired.")
-
-    redirect_uri = _resolve_zoho_redirect_uri(None, connection.metadata)
-    if not redirect_uri:
-        raise HTTPException(status_code=503, detail="ZOHO_REDIRECT_URI is required to complete OAuth.")
-
-    try:
-        token_payload = exchange_zoho_authorization_code(
-            request.code,
-            redirect_uri,
-            accounts_server=request.accounts_server,
-        )
-        organizations = list_zoho_organizations(
-            token_payload["access_token"],
-            api_domain=token_payload.get("api_domain"),
-        )
-    except (ZohoApiError, ZohoConfigurationError) as exc:
-        connection.status = SourceConnectionStatus.FAILED
-        connection.message = str(exc)
-        STORE.upsert_source_connection(connection)
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-
-    selected_org = choose_default_organization(organizations)
-    connection.status = SourceConnectionStatus.ACTIVE
-    connection.external_organization_id = selected_org.get("organization_id") if selected_org else None
-    connection.external_organization_name = selected_org.get("name") if selected_org else None
-    connection.capabilities = sorted(set(connection.capabilities + ["live_oauth", "remote_sync"]))
-    connection.message = "Zoho Books authorization completed. You can sync invoices and bills into the import flow."
-    connection.auth_url = None
-    connection.metadata = {
-        **connection.metadata,
-        "api_domain": token_payload.get("api_domain"),
-        "accounts_server": token_payload.get("accounts_server"),
-        "organizations": [
-            {
-                "organization_id": org.get("organization_id"),
-                "name": org.get("name"),
-                "is_default_org": bool(org.get("is_default_org")),
-            }
-            for org in organizations
-        ],
-    }
-    STORE.upsert_source_token(connection.connection_id, token_payload)
-    STORE.upsert_source_connection(connection)
-    return connection
-
-
-@app.post("/v1/sources/zoho/{connection_id}/sync", response_model=ParsedImportBundle)
-def sync_zoho_connection(
-    connection_id: str,
-    principal: AuthPrincipal = Depends(require_roles("owner", "finance_manager", "accountant")),
-) -> ParsedImportBundle:
-    connection = STORE.source_connections.get(connection_id)
-    if connection is None or connection.source_type != SourceType.ZOHO:
-        raise HTTPException(status_code=404, detail="Zoho connection not found")
-    ensure_org_access(principal, connection.org_id)
-
-    token_payload = STORE.get_source_token(connection_id)
-    if token_payload is None:
-        raise HTTPException(status_code=409, detail="Zoho connection has not completed OAuth.")
-
-    try:
-        if token_is_expired(token_payload):
-            refresh_token = token_payload.get("refresh_token")
-            if not refresh_token:
-                raise ZohoApiError("Zoho refresh token is missing. Reconnect the source and try again.")
-            refreshed_payload = refresh_zoho_access_token(
-                refresh_token,
-                accounts_server=token_payload.get("accounts_server"),
-            )
-            token_payload = {**token_payload, **refreshed_payload}
-            STORE.upsert_source_token(connection_id, token_payload)
-
-        selected_organization_id = connection.external_organization_id
-        selected_organization_name = connection.external_organization_name
-        if not selected_organization_id:
-            organizations = list_zoho_organizations(
-                token_payload["access_token"],
-                api_domain=token_payload.get("api_domain"),
-            )
-            selected_org = choose_default_organization(organizations)
-            if selected_org is None:
-                raise ZohoApiError("No Zoho Books organizations are available for this account.")
-            selected_organization_id = str(selected_org.get("organization_id"))
-            selected_organization_name = selected_org.get("name")
-
-        zoho_payload = fetch_zoho_import_payload(
-            token_payload["access_token"],
-            api_domain=token_payload.get("api_domain") or connection.metadata.get("api_domain"),
-            organization_id=selected_organization_id,
-        )
-    except (ZohoApiError, ZohoConfigurationError) as exc:
-        connection.status = SourceConnectionStatus.FAILED
-        connection.message = str(exc)
-        STORE.upsert_source_connection(connection)
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-
-    checksum = _compute_import_checksum(
-        SourceType.ZOHO,
-        payload=zoho_payload,
-        source_hint=selected_organization_id,
-    )
-    existing_bundle = STORE.find_import_by_checksum(connection.org_id, SourceType.ZOHO, checksum)
-    if existing_bundle is not None:
-        return existing_bundle
-
-    bundle = parse_import(
-        org_id=connection.org_id,
-        source_type=SourceType.ZOHO,
-        filename="zoho-books-{organization_id}.json".format(organization_id=selected_organization_id),
-        payload=zoho_payload,
-        source_hint=selected_organization_id,
-    )
-    bundle.import_batch.checksum = checksum
-    STORE.upsert_import(bundle)
-
-    connection.status = SourceConnectionStatus.ACTIVE
-    connection.external_organization_id = selected_organization_id
-    connection.external_organization_name = selected_organization_name
-    connection.last_synced_at = utc_now()
-    connection.message = "Zoho Books sync completed. The latest invoices and bills are ready in the import flow."
-    connection.metadata = {
-        **connection.metadata,
-        "api_domain": token_payload.get("api_domain"),
-        "last_sync_import_batch_id": bundle.import_batch.import_batch_id,
-        "last_sync_event_count": bundle.import_batch.event_count,
-    }
-    STORE.upsert_source_connection(connection)
-    return bundle
-
-
-@app.post("/v1/desktop-agents/register", response_model=DesktopAgentRecord)
-def register_desktop_agent(
-    request: DesktopAgentRegistrationRequest,
-    principal: AuthPrincipal = Depends(require_roles("owner", "finance_manager")),
-) -> DesktopAgentRecord:
-    ensure_org_access(principal, request.org_id)
-    agent = DesktopAgentRecord(
-        org_id=request.org_id,
-        machine_name=request.machine_name,
-        last_seen_at=utc_now(),
-        capabilities=["manual_upload_ready", "folder_watch_ready", "local_tally_bridge_ready"],
-        message="Desktop registration completed. The local sync bridge can now watch a folder and upload supported files through the API.",
-    )
-    STORE.upsert_desktop_agent(agent)
-    return agent
-
-
-@app.post("/v1/desktop-agents/{agent_id}/heartbeat", response_model=DesktopAgentRecord)
-def heartbeat_desktop_agent(
-    agent_id: str,
-    request: DesktopAgentHeartbeatRequest,
-    principal: AuthPrincipal = Depends(require_roles("owner", "finance_manager")),
-) -> DesktopAgentRecord:
-    agent = STORE.desktop_agents.get(agent_id)
-    if agent is None:
-        raise HTTPException(status_code=404, detail="Desktop agent not found")
-    ensure_org_access(principal, agent.org_id)
-    agent.status = request.status
-    agent.last_seen_at = utc_now()
-    if request.watched_path is not None:
-        agent.watched_path = request.watched_path
-    if request.message is not None:
-        agent.message = request.message
-    STORE.upsert_desktop_agent(agent)
-    return agent
 
 
 @app.post("/v1/scenarios", response_model=ForecastScenario)

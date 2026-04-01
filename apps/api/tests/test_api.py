@@ -42,79 +42,7 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["forecast_run"]["org_id"], "demo-org")
 
-    def test_zoho_connection_registration(self):
-        response = self.client.post("/v1/sources/zoho/connect", json={"org_id": "demo-org"}, headers=OWNER_HEADERS)
-        self.assertEqual(response.status_code, 200)
-        payload = response.json()
-        self.assertEqual(payload["org_id"], "demo-org")
-        self.assertEqual(payload["source_type"], "zoho")
 
-    def test_desktop_agent_registration(self):
-        response = self.client.post(
-            "/v1/desktop-agents/register",
-            json={"org_id": "demo-org", "machine_name": "FINANCE-WS-01"},
-            headers=OWNER_HEADERS,
-        )
-        self.assertEqual(response.status_code, 200)
-        payload = response.json()
-        self.assertEqual(payload["org_id"], "demo-org")
-        self.assertEqual(payload["machine_name"], "FINANCE-WS-01")
-        self.assertIn("folder_watch_ready", payload["capabilities"])
-
-    def test_desktop_agent_heartbeat_updates_status(self):
-        register_response = self.client.post(
-            "/v1/desktop-agents/register",
-            json={"org_id": "demo-org", "machine_name": "FINANCE-WS-02"},
-            headers=OWNER_HEADERS,
-        )
-        agent_id = register_response.json()["agent_id"]
-
-        response = self.client.post(
-            f"/v1/desktop-agents/{agent_id}/heartbeat",
-            json={
-                "status": "online",
-                "watched_path": "/Users/demo/Desktop/cashflow-exports",
-                "message": "Watching for new exports",
-            },
-            headers=OWNER_HEADERS,
-        )
-        self.assertEqual(response.status_code, 200)
-        payload = response.json()
-        self.assertEqual(payload["status"], "online")
-        self.assertEqual(payload["watched_path"], "/Users/demo/Desktop/cashflow-exports")
-
-    def test_desktop_agent_upload_updates_last_sync(self):
-        register_response = self.client.post(
-            "/v1/desktop-agents/register",
-            json={"org_id": "demo-org", "machine_name": "FINANCE-WS-03"},
-            headers=OWNER_HEADERS,
-        )
-        agent_id = register_response.json()["agent_id"]
-
-        response = self.client.post(
-            "/v1/imports",
-            data={
-                "org_id": "demo-org",
-                "source_type": "tally",
-                "source_hint": "receivables",
-                "desktop_agent_id": agent_id,
-            },
-            files={
-                "file": (
-                    "receivables.csv",
-                    b"party_name,amount,due_date,invoice_no\nAcme Retail,12500,2025-04-15,INV-1001\n",
-                    "text/csv",
-                )
-            },
-            headers=OWNER_HEADERS,
-        )
-        self.assertEqual(response.status_code, 200)
-        import_batch_id = response.json()["import_batch"]["import_batch_id"]
-
-        agent = STORE.desktop_agents[agent_id]
-        self.assertEqual(agent.status.value, "online")
-        self.assertEqual(agent.last_upload_filename, "receivables.csv")
-        self.assertEqual(agent.last_upload_batch_id, import_batch_id)
 
     def test_viewer_cannot_create_import(self):
         response = self.client.post("/v1/imports", json={"use_demo": True}, headers=VIEWER_HEADERS)
@@ -233,6 +161,45 @@ class ApiTestCase(unittest.TestCase):
         self.assertGreaterEqual(payload["totals"]["trace_count"], 0)
         self.assertIn("summary", payload)
 
+    def test_upload_rejects_unsupported_extension(self):
+        response = self.client.post(
+            "/v1/imports",
+            data={"org_id": "demo-org", "source_type": "manual"},
+            files={"file": ("malware.exe", b"MZ\x90\x00", "application/octet-stream")},
+            headers=OWNER_HEADERS,
+        )
+        self.assertEqual(response.status_code, 415)
+        self.assertIn(".exe", response.json()["detail"])
+
+    def test_upload_malformed_csv_returns_structured_400(self):
+        csv_content = (
+            "counterparty,event_type,gross_amount_inr,due_date,document_number\n"
+            "Acme Retail,inflow,125000,2026-04-10,INV-001\n"
+            "Bad Row,inflow,NOT_A_NUMBER,2026-04-15,INV-002\n"
+        )
+        response = self.client.post(
+            "/v1/imports",
+            data={"org_id": "demo-org", "source_type": "manual"},
+            files={"file": ("test.csv", csv_content.encode(), "text/csv")},
+            headers=OWNER_HEADERS,
+        )
+        self.assertEqual(response.status_code, 400)
+        detail = response.json()["detail"]
+        self.assertEqual(detail["error_code"], "parse_error")
+        self.assertIn("Row", detail["message"])
+
+    def test_template_download_returns_xlsx(self):
+        response = self.client.get("/v1/templates/cashflow-os-template.xlsx")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.headers["content-type"],
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        self.assertGreater(len(response.content), 1000)
+        # Verify it's a valid XLSX by checking the ZIP signature
+        self.assertTrue(response.content[:4] == b"PK\x03\x04")
+
 
 if __name__ == "__main__":
     unittest.main()
+

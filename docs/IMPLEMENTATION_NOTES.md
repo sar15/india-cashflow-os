@@ -10,11 +10,27 @@ This codebase implements the first delivery slice of the architecture plan:
 - Role-based API authentication for owner, finance manager, accountant, and viewer access.
 - Live onboarding flow from import to forecast creation in the Next.js app.
 
+## Architecture: Manual-Upload-Only Ingestion
+
+All data enters the system via file uploads through `POST /v1/imports`. The ingestion pipeline supports three source types:
+
+| Source Type | File Formats | Parser |
+|---|---|---|
+| `manual` | XLSX, CSV | `ingestion/parsers/manual_template.py` |
+| `tally` | CSV, XML, XLSX | `ingestion/parsers/tally_export.py` |
+| `zoho` | JSON | `ingestion/parsers/zoho_export.py` |
+
+Parser errors are raised as `FileParseError` with row-number, column, and human-readable message context. The API layer catches these and returns structured HTTP 400 responses.
+
+File uploads are validated before parsing:
+- **50 MB** maximum file size (HTTP 413 if exceeded)
+- Extension-based type checking: `.csv`, `.xlsx`, `.xls`, `.xml`, `.json` (HTTP 415 if rejected)
+- Raw file bytes are held in memory only — never written to disk
+
+MSME detection for counterparty enrichment is available in `utils/msme.py` and works on contact metadata from file exports.
+
 ## Deliberate v1 limits
 
-- No PostgreSQL/Redis/object-storage infrastructure yet; persistence is local file-backed state.
-- Zoho integration supports JSON payload ingestion, not live OAuth token exchange.
-- Tally ingestion focuses on exported ledgers and outstanding reports, not always-on sync.
 - AI parsing fallback is represented as an architecture seam, not connected to an LLM in this slice.
 - No background worker deployment yet; report and forecast jobs execute inline in the app process.
 

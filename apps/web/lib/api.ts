@@ -3,9 +3,8 @@ export function getApiBaseUrl() {
     process.env.API_URL ??
     process.env.API_BASE_URL ??
     process.env.NEXT_PUBLIC_API_URL ??
-    process.env.NEXT_PUBLIC_API_BASE_URL ??
-    "https://cashflow-os-api.onrender.com";
-    
+    process.env.NEXT_PUBLIC_API_BASE_URL;
+
   if (apiBase) return apiBase.replace(/\/$/, "");
 
   // Fallback for Vercel Server Components
@@ -14,7 +13,8 @@ export function getApiBaseUrl() {
     return `https://${vercelUrl}/backend`;
   }
 
-  return "https://cashflow-os-api.onrender.com";
+  // Graceful failure or relative proxy if everything is missing
+  return "";
 }
 
 export function getApiAuthToken() {

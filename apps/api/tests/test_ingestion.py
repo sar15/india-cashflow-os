@@ -4,9 +4,9 @@ import unittest
 
 from openpyxl import Workbook
 
-from cashflow_os.ingestion.manual_template import parse_manual_workbook
-from cashflow_os.ingestion.tally import parse_tally_file
-from cashflow_os.ingestion.zoho import parse_zoho_payload
+from cashflow_os.ingestion.parsers.manual_template import parse_manual_workbook
+from cashflow_os.ingestion.parsers.tally_export import parse_tally_file
+from cashflow_os.ingestion.parsers.zoho_export import parse_zoho_payload
 from cashflow_os.utils.dates import parse_date_value
 
 
@@ -72,8 +72,8 @@ class TallyParsingTestCase(unittest.TestCase):
         self.assertTrue(any(issue.field_name == "due_date" for issue in bundle.import_batch.unresolved_issues))
 
 
-class ZohoParsingTestCase(unittest.TestCase):
-    def test_zoho_payload_parses_balances_and_invalid_dates(self):
+class ZohoExportParsingTestCase(unittest.TestCase):
+    def test_zoho_export_parses_balances_and_invalid_dates(self):
         bundle = parse_zoho_payload(
             org_id="demo-org",
             filename="zoho.json",

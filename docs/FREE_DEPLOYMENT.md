@@ -1,30 +1,26 @@
 # Free Deployment Guide
 
-This repo can now be deployed on free Vercel tiers with persistent storage and without public demo credentials.
+This repo can be deployed on free Vercel tiers or Render with persistent storage.
 
 ## Recommended layout
 
-Deploy `apps/api` as one Vercel project:
+Deploy `apps/api` as one service (Render or Vercel):
 
 - Root directory: `apps/api`
-- Runtime entrypoint: `index.py`
-- Enable Blob storage on the project
+- Runtime entrypoint: `index.py` (Vercel) or uvicorn (Render)
+- Enable Blob storage or Supabase for persistence
 
-Deploy `apps/web` as a second Vercel project:
+Deploy `apps/web` as a second project (Vercel):
 
 - Root directory: `apps/web`
 - Point `API_BASE_URL` at the deployed API URL
 
 ## API environment variables
 
-- `CASHFLOW_STORAGE_BACKEND=vercel_blob`
-- `BLOB_READ_WRITE_TOKEN=<created automatically by Vercel Blob>`
+- `DATABASE_URL=postgresql://...` (Supabase connection string)
+- `CASHFLOW_ALLOWED_ORIGINS=<your web app URL>`
 - `CASHFLOW_DISABLE_DEMO_AUTH=1`
 - `CASHFLOW_AUTH_TOKENS_JSON=<generated token registry>`
-- `CASHFLOW_ALLOWED_ORIGINS=<your web app URL>`
-- `ZOHO_CLIENT_ID=<from Zoho API console>`
-- `ZOHO_CLIENT_SECRET=<from Zoho API console>`
-- `ZOHO_REDIRECT_URI=https://<your-web-app-domain>/auth/zoho/callback`
 
 ## Web environment variables
 
@@ -47,14 +43,4 @@ The script prints:
 - `CASHFLOW_WEB_USERS_JSON`
 - `CASHFLOW_AUTH_TOKENS_JSON`
 
-Paste those into the two Vercel projects.
-
-## Zoho setup
-
-Create a Zoho OAuth client and set the redirect URI to:
-
-```text
-https://<your-web-app-domain>/auth/zoho/callback
-```
-
-The web app now redirects users into Zoho, returns through the callback route, exchanges the code through the API, and immediately syncs invoices and bills into a new import batch.
+Paste those into your hosting environment variables.

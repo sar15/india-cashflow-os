@@ -3,8 +3,6 @@ from typing import Dict, List, Optional, Union
 
 from pydantic import BaseModel
 
-from cashflow_os.domain.models import DesktopAgentStatus
-
 
 class ImportCreatePayload(BaseModel):
     org_id: Optional[str] = None
@@ -45,27 +43,3 @@ class ConfirmImportPayload(BaseModel):
     minimum_cash_buffer_minor_units: int = 0
     scenario: Optional[ScenarioSetupPayload] = None
     obligations: list[ObligationSetupPayload] = []
-
-
-class ZohoConnectRequest(BaseModel):
-    org_id: str
-    client_name: str = "Zoho Books"
-    redirect_uri: Optional[str] = None
-
-
-class ZohoExchangeRequest(BaseModel):
-    connection_id: str
-    state: str
-    code: str
-    accounts_server: Optional[str] = None
-
-
-class DesktopAgentRegistrationRequest(BaseModel):
-    org_id: str
-    machine_name: str
-
-
-class DesktopAgentHeartbeatRequest(BaseModel):
-    status: DesktopAgentStatus = DesktopAgentStatus.ONLINE
-    watched_path: Optional[str] = None
-    message: Optional[str] = None

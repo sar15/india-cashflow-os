@@ -2,8 +2,6 @@
 
 India-first cash forecasting platform for SMEs, CAs, and operating finance teams.
 
-This repository now contains a working MVP foundation:
-
 - `apps/api`: FastAPI backend with deterministic cash forecast engine, India compliance rules, persistent local state, authenticated API access, KPI/report builders, Excel/PDF exports, and tests.
 - `apps/web`: Next.js App Router frontend with live import/setup flows, dashboard reporting, and export proxy routes.
 - `templates`: import templates for manual onboarding.
@@ -12,17 +10,19 @@ This repository now contains a working MVP foundation:
 ## What is implemented
 
 - Deterministic 13-week direct cash forecast engine.
-- India rules for GST, TDS, EPF, payroll, EMI, and MSME 45-day payable risk.
+- India rules for GST, TDS, EPF, payroll, EMI, and MSME 45-day payable risk (Section 43B(h)).
 - Canonical cash-event model with audit trace support.
 - KPI layer and chart/report specification generation.
 - PDF and Excel report export foundation.
 - Persistent FastAPI API surface aligned to the planned endpoints.
 - Role-based API authentication with owner, finance manager, accountant, and viewer roles.
-- Tally, Zoho, and manual-template ingestion foundations.
+- **Manual-upload-only ingestion** — Tally exports (CSV/XML/XLSX), Zoho Books exports (JSON), and a standard Cashflow OS template (XLSX/CSV).
+- 50 MB upload limit with extension-based file validation.
+- Row-level parsing error feedback for malformed files.
+- Downloadable `.xlsx` template with sample data at `GET /v1/templates/cashflow-os-template.xlsx`.
 - Live Next.js onboarding flow for import, mapping confirmation, forecast creation, dashboard viewing, and report export.
 - Signed web sessions with deploy-safe user configuration.
-- Live Zoho OAuth callback + sync flow for invoices and bills when Zoho credentials are configured.
-- Free-tier Vercel deployment path with Blob-backed persistence in `docs/FREE_DEPLOYMENT.md`.
+- Checksum-based import deduplication.
 
 ## Quick start
 
@@ -38,7 +38,7 @@ python3 -m uvicorn --app-dir src cashflow_os.api.main:app --reload
 
 ```bash
 cd apps/api
-PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_*.py'
+PYTHONPATH=src python3 -m pytest tests/ -v
 ```
 
 ### Web
@@ -57,16 +57,6 @@ docker compose -f compose.local.yml up -d
 ```
 
 This brings up free local `Postgres`, `Redis`, and `MinIO`. The API can stay on lightweight file storage for the fastest start, or switch to local MinIO by setting `CASHFLOW_STORAGE_BACKEND=minio` in `apps/api/.env`.
-
-### Desktop sync agent
-
-```bash
-cd apps/desktop_agent
-cp .env.example .env
-python3 main.py --once
-```
-
-The desktop agent registers the machine, heartbeats its watch folder, and uploads new files through the existing authenticated API.
 
 ## Free deployment
 

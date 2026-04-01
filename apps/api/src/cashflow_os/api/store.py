@@ -17,7 +17,6 @@ from cashflow_os.domain.models import (
     BankBalanceSnapshot,
     CanonicalCashEvent,
     Counterparty,
-    DesktopAgentRecord,
     EntityType,
     EventType,
     EventStatus,
@@ -33,7 +32,6 @@ from cashflow_os.domain.models import (
     ReportPack,
     ScenarioKind,
     SourceType,
-    SourceConnectionRecord,
 )
 from cashflow_os.forecast.engine import build_forecast_run
 from cashflow_os.reports.builder import build_report_pack
@@ -88,10 +86,6 @@ class InMemoryStore:
         self.report_files: Dict[str, Dict[str, bytes]] = {}
         self.obligations: Dict[str, List[RecurringObligation]] = {}
         self.scenarios: Dict[str, ForecastScenario] = {}
-        self.source_connections: Dict[str, SourceConnectionRecord] = {}
-        self.desktop_agents: Dict[str, DesktopAgentRecord] = {}
-        self.source_tokens: Dict[str, dict] = {}
-        self.oauth_states: Dict[str, str] = {}
         self._load_state()
         if not self.forecast_runs:
             self.seed_demo()
@@ -126,10 +120,6 @@ class InMemoryStore:
         self.reports = _load_model_map(payload.get("reports", {}), ReportPack)
         self.obligations = _load_model_list_map(payload.get("obligations", {}), RecurringObligation)
         self.scenarios = _load_model_map(payload.get("scenarios", {}), ForecastScenario)
-        self.source_connections = _load_model_map(payload.get("source_connections", {}), SourceConnectionRecord)
-        self.desktop_agents = _load_model_map(payload.get("desktop_agents", {}), DesktopAgentRecord)
-        self.source_tokens = payload.get("source_tokens", {})
-        self.oauth_states = payload.get("oauth_states", {})
 
     def _save_state(self) -> None:
         state_payload = {
@@ -141,10 +131,6 @@ class InMemoryStore:
             "reports": _dump_model_map(self.reports),
             "obligations": _dump_model_list_map(self.obligations),
             "scenarios": _dump_model_map(self.scenarios),
-            "source_connections": _dump_model_map(self.source_connections),
-            "desktop_agents": _dump_model_map(self.desktop_agents),
-            "source_tokens": self.source_tokens,
-            "oauth_states": self.oauth_states,
         }
 
         with self._lock:
@@ -187,33 +173,6 @@ class InMemoryStore:
 
     def add_obligation(self, obligation: RecurringObligation) -> None:
         self.obligations.setdefault(obligation.org_id, []).append(obligation)
-        self._save_state()
-
-    def upsert_source_connection(self, connection: SourceConnectionRecord) -> None:
-        self.source_connections[connection.connection_id] = connection
-        self._save_state()
-
-    def register_oauth_state(self, connection_id: str, state: str) -> None:
-        self.oauth_states[state] = connection_id
-        self._save_state()
-
-    def consume_oauth_state(self, state: str) -> Optional[str]:
-        connection_id = self.oauth_states.pop(state, None)
-        self._save_state()
-        return connection_id
-
-    def upsert_source_token(self, connection_id: str, token_payload: dict) -> None:
-        self.source_tokens[connection_id] = token_payload
-        self._save_state()
-
-    def get_source_token(self, connection_id: str) -> Optional[dict]:
-        token_payload = self.source_tokens.get(connection_id)
-        if token_payload is None:
-            return None
-        return dict(token_payload)
-
-    def upsert_desktop_agent(self, agent: DesktopAgentRecord) -> None:
-        self.desktop_agents[agent.agent_id] = agent
         self._save_state()
 
     def upsert_scenario(self, scenario: ForecastScenario) -> None:

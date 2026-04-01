@@ -1,8 +1,17 @@
+"""Parser for Tally export files (CSV, XML, and XLSX).
+
+Handles uploaded ledger exports, outstanding statements, and
+trial balance files commonly exported from Tally ERP / Tally Prime.
+This is a **file parser**, not an API client.
+"""
+
 from datetime import date
 from io import BytesIO, StringIO
 from typing import Dict, List, Optional
 from xml.etree import ElementTree
 import csv
+
+from cashflow_os.ingestion.errors import FileParseError
 
 from cashflow_os.utils.dates import today_ist, parse_date_value
 from cashflow_os.utils.money import parse_indian_number, to_minor_units
@@ -51,8 +60,14 @@ def _issue_invalid_date(issues: List[ImportIssue], row_number: int, field_name: 
     )
 
 
-def _parse_xml_rows(file_bytes: bytes) -> List[Dict[str, str]]:
-    root = ElementTree.fromstring(file_bytes)
+def _parse_xml_rows(file_bytes: bytes, filename: str) -> List[Dict[str, str]]:
+    try:
+        root = ElementTree.fromstring(file_bytes)
+    except ElementTree.ParseError as xml_err:
+        raise FileParseError(
+            "Cannot parse '{filename}' as XML: {error}".format(filename=filename, error=str(xml_err)),
+            filename=filename,
+        ) from xml_err
     rows: List[Dict[str, str]] = []
     candidate_tags = ("row", "voucher", "ledgerentry", "ledger", "bill")
 
@@ -73,7 +88,7 @@ def _parse_xml_rows(file_bytes: bytes) -> List[Dict[str, str]]:
 
 
 def _parse_frame(org_id: str, filename: str, frame: List[Dict[str, str]], source_hint: str) -> ParsedImportBundle:
-    batch = ImportBatch(org_id=org_id, source_type=SourceType.TALLY, filename=filename)
+    batch = ImportBatch(org_id=org_id, source_type=SourceType.TALLY_EXPORT, filename=filename)
     counterparties: Dict[str, Counterparty] = {}
     events: List[CanonicalCashEvent] = []
     issues: List[ImportIssue] = []
@@ -82,62 +97,71 @@ def _parse_frame(org_id: str, filename: str, frame: List[Dict[str, str]], source
     entity_type = EntityType.INVOICE if source_hint == "receivables" else EntityType.BILL
 
     for row_index, row in enumerate(frame, start=2):
-        party_name = _first_matching_row(row, PARTY_HEADERS)
-        amount = _first_matching_row(row, AMOUNT_HEADERS)
-        if not party_name or not amount:
-            continue
+        try:
+            party_name = _first_matching_row(row, PARTY_HEADERS)
+            amount = _first_matching_row(row, AMOUNT_HEADERS)
+            if not party_name or not amount:
+                continue
 
-        party_name_text = str(party_name).strip()
-        counterparty = counterparties.get(party_name_text)
-        if counterparty is None:
-            msme_val = str(_first_matching_row(row, MSME_HEADERS) or "").lower()
-            counterparty = Counterparty(
-                entity_name=party_name_text,
-                relationship_type=relationship,
-                is_msme_registered=msme_val in ("true", "yes", "1"),
-            )
-            counterparties[party_name_text] = counterparty
+            party_name_text = str(party_name).strip()
+            counterparty = counterparties.get(party_name_text)
+            if counterparty is None:
+                msme_val = str(_first_matching_row(row, MSME_HEADERS) or "").lower()
+                counterparty = Counterparty(
+                    entity_name=party_name_text,
+                    relationship_type=relationship,
+                    is_msme_registered=msme_val in ("true", "yes", "1"),
+                )
+                counterparties[party_name_text] = counterparty
 
-        amount_value = to_minor_units(parse_indian_number(amount))
-        document_number = str(_first_matching_row(row, DOC_HEADERS) or "{hint}-{row}".format(hint=source_hint, row=row_index))
-        raw_document_date = _first_matching_row(row, DATE_HEADERS)
-        raw_due_date = _first_matching_row(row, DUE_HEADERS)
-        document_date = parse_date_value(raw_document_date)
-        due_date = parse_date_value(raw_due_date)
+            amount_value = to_minor_units(parse_indian_number(amount))
+            document_number = str(_first_matching_row(row, DOC_HEADERS) or "{hint}-{row}".format(hint=source_hint, row=row_index))
+            raw_document_date = _first_matching_row(row, DATE_HEADERS)
+            raw_due_date = _first_matching_row(row, DUE_HEADERS)
+            document_date = parse_date_value(raw_document_date)
+            due_date = parse_date_value(raw_due_date)
 
-        if raw_document_date not in (None, "") and document_date is None:
-            _issue_invalid_date(issues, row_index, "document_date")
-        if raw_due_date not in (None, "") and due_date is None:
-            _issue_invalid_date(issues, row_index, "due_date")
-        if due_date is None and document_date is None:
-            issues.append(
-                ImportIssue(
-                    code="missing_schedule",
-                    severity=Severity.WARNING,
-                    message="Row {row} is missing both document date and due date.".format(row=row_index),
-                    row_number=row_index,
+            if raw_document_date not in (None, "") and document_date is None:
+                _issue_invalid_date(issues, row_index, "document_date")
+            if raw_due_date not in (None, "") and due_date is None:
+                _issue_invalid_date(issues, row_index, "due_date")
+            if due_date is None and document_date is None:
+                issues.append(
+                    ImportIssue(
+                        code="missing_schedule",
+                        severity=Severity.WARNING,
+                        message="Row {row} is missing both document date and due date.".format(row=row_index),
+                        row_number=row_index,
+                    )
+                )
+
+            events.append(
+                CanonicalCashEvent(
+                    org_id=org_id,
+                    source_id="tally.upload",
+                    import_batch_id=batch.import_batch_id,
+                    event_type=event_type,
+                    entity_type=entity_type,
+                    counterparty_id=counterparty.counterparty_id,
+                    counterparty_name=counterparty.entity_name,
+                    document_number=document_number,
+                    document_date=document_date,
+                    due_date=due_date,
+                    gross_minor_units=amount_value,
+                    net_minor_units=amount_value,
+                    source_confidence=0.9,
+                    mapping_confidence=0.85,
+                    notes="Parsed from Tally export file",
                 )
             )
-
-        events.append(
-            CanonicalCashEvent(
-                org_id=org_id,
-                source_id="tally.upload",
-                import_batch_id=batch.import_batch_id,
-                event_type=event_type,
-                entity_type=entity_type,
-                counterparty_id=counterparty.counterparty_id,
-                counterparty_name=counterparty.entity_name,
-                document_number=document_number,
-                document_date=document_date,
-                due_date=due_date,
-                gross_minor_units=amount_value,
-                net_minor_units=amount_value,
-                source_confidence=0.9,
-                mapping_confidence=0.85,
-                notes="Parsed from Tally export",
-            )
-        )
+        except FileParseError:
+            raise
+        except Exception as row_exc:
+            raise FileParseError(
+                "Row {row}: {error}".format(row=row_index, error=str(row_exc)),
+                filename=filename,
+                row_number=row_index,
+            ) from row_exc
 
     batch.event_count = len(events)
     batch.counterparty_count = len(counterparties)
@@ -160,10 +184,16 @@ def parse_tally_file(org_id: str, filename: str, file_bytes: bytes, source_hint:
             reader.fieldnames = normalized_fields
             frame = [dict(row) for row in reader]
     elif filename.lower().endswith(".xml") or file_bytes.lstrip().startswith(b"<"):
-        frame = _parse_xml_rows(file_bytes)
+        frame = _parse_xml_rows(file_bytes, filename)
     else:
-        from openpyxl import load_workbook
-        wb = load_workbook(BytesIO(file_bytes), data_only=True)
+        try:
+            from openpyxl import load_workbook
+            wb = load_workbook(BytesIO(file_bytes), data_only=True)
+        except Exception as xl_err:
+            raise FileParseError(
+                "Cannot open '{filename}' as an Excel workbook.".format(filename=filename),
+                filename=filename,
+            ) from xl_err
         sheet = wb.active
         headers = []
         for i, row in enumerate(sheet.iter_rows(values_only=True)):

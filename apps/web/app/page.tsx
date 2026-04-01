@@ -5,7 +5,7 @@ import { AppShell } from "@/components/app-shell";
 const steps = [
   {
     title: "Connect or Upload",
-    body: "Pull in Tally exports, Zoho Books data, or a clean Excel template without forcing perfect source systems."
+    body: "Upload Tally exports, Zoho Books exports, or a clean Excel template — no API integrations needed."
   },
   {
     title: "Review Exceptions Only",

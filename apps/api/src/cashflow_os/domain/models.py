@@ -61,22 +61,10 @@ class Severity(str, Enum):
 
 
 class SourceType(str, Enum):
-    TALLY = "tally"
-    ZOHO = "zoho"
+    TALLY_EXPORT = "tally"
+    ZOHO_EXPORT = "zoho"
     MANUAL = "manual"
     DEMO = "demo"
-
-
-class SourceConnectionStatus(str, Enum):
-    PENDING = "pending"
-    ACTIVE = "active"
-    FAILED = "failed"
-
-
-class DesktopAgentStatus(str, Enum):
-    REGISTERED = "registered"
-    ONLINE = "online"
-    OFFLINE = "offline"
 
 
 class ObligationFrequency(str, Enum):
@@ -209,35 +197,7 @@ class ImportBatch(BaseModel):
     unresolved_issues: List[ImportIssue] = Field(default_factory=list)
 
 
-class SourceConnectionRecord(BaseModel):
-    connection_id: str = Field(default_factory=lambda: str(uuid4()))
-    org_id: str
-    source_type: SourceType
-    client_name: str
-    status: SourceConnectionStatus = SourceConnectionStatus.PENDING
-    created_at: datetime = Field(default_factory=utc_now)
-    capabilities: List[str] = Field(default_factory=list)
-    message: Optional[str] = None
-    auth_url: Optional[str] = None
-    external_organization_id: Optional[str] = None
-    external_organization_name: Optional[str] = None
-    last_synced_at: Optional[datetime] = None
-    metadata: Dict[str, Any] = Field(default_factory=dict)
 
-
-class DesktopAgentRecord(BaseModel):
-    agent_id: str = Field(default_factory=lambda: str(uuid4()))
-    org_id: str
-    machine_name: str
-    status: DesktopAgentStatus = DesktopAgentStatus.REGISTERED
-    registered_at: datetime = Field(default_factory=utc_now)
-    last_seen_at: Optional[datetime] = None
-    capabilities: List[str] = Field(default_factory=list)
-    watched_path: Optional[str] = None
-    last_uploaded_at: Optional[datetime] = None
-    last_upload_filename: Optional[str] = None
-    last_upload_batch_id: Optional[str] = None
-    message: Optional[str] = None
 
 
 class ParsedImportBundle(BaseModel):

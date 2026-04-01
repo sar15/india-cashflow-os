@@ -5,6 +5,15 @@ import { useState } from "react";
 
 import { formatCurrency } from "@/lib/formatters";
 
+const MAX_FILE_SIZE_MB = 50;
+const MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024;
+const ALLOWED_EXTENSIONS = new Set([".csv", ".xlsx", ".xls", ".xml", ".json"]);
+
+function getFileExtension(filename: string): string {
+  const dot = filename.lastIndexOf(".");
+  return dot >= 0 ? filename.slice(dot).toLowerCase() : "";
+}
+
 type ImportIssue = {
   issue_id: string;
   severity: string;
@@ -68,6 +77,14 @@ type ImportResult = {
   obligations: ImportObligation[];
 };
 
+type ParseErrorDetail = {
+  message?: string;
+  error_code?: string;
+  filename?: string | null;
+  row?: number | null;
+  column?: string | null;
+};
+
 function formatDelay(days: number) {
   if (!days) {
     return "On-time";
@@ -79,6 +96,20 @@ function formatConfidence(confidence: number) {
   return `${Math.round(confidence * 100)}% confidence`;
 }
 
+function formatErrorMessage(detail: unknown): string {
+  if (typeof detail === "string") return detail;
+  if (detail && typeof detail === "object") {
+    const parsed = detail as ParseErrorDetail;
+    const parts: string[] = [];
+    if (parsed.row) parts.push(`Row ${parsed.row}`);
+    if (parsed.column) parts.push(`Column: ${parsed.column}`);
+    if (parsed.message) parts.push(parsed.message);
+    if (parts.length > 0) return parts.join(" · ");
+    if (parsed.filename) return `Error parsing ${parsed.filename}`;
+  }
+  return "Import failed. Please check your file and try again.";
+}
+
 export function ImportWorkbench() {
   const [sourceType, setSourceType] = useState("manual");
   const [sourceHint, setSourceHint] = useState("receivables");
@@ -87,9 +118,43 @@ export function ImportWorkbench() {
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
+  function validateFile(file: File): string | null {
+    const ext = getFileExtension(file.name);
+    if (!ALLOWED_EXTENSIONS.has(ext)) {
+      return `Unsupported file type "${ext}". Accepted formats: ${[...ALLOWED_EXTENSIONS].sort().join(", ")}`;
+    }
+    if (file.size > MAX_FILE_SIZE_BYTES) {
+      return `File is too large (${(file.size / (1024 * 1024)).toFixed(1)} MB). Maximum allowed size is ${MAX_FILE_SIZE_MB} MB.`;
+    }
+    return null;
+  }
+
+  function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0] ?? null;
+    setError(null);
+    if (file) {
+      const validationError = validateFile(file);
+      if (validationError) {
+        setError(validationError);
+        setSelectedFile(null);
+        return;
+      }
+    }
+    setSelectedFile(file);
+  }
+
   async function runImport(useDemo: boolean) {
     setError(null);
     setResult(null);
+
+    if (!useDemo && selectedFile) {
+      const validationError = validateFile(selectedFile);
+      if (validationError) {
+        setError(validationError);
+        return;
+      }
+    }
+
     setIsSubmitting(true);
     try {
       const formData = new FormData();
@@ -106,7 +171,7 @@ export function ImportWorkbench() {
       });
       const payload = await response.json();
       if (!response.ok) {
-        setError(payload.detail ?? payload.error ?? "Import failed.");
+        setError(formatErrorMessage(payload.detail ?? payload.error));
         return;
       }
       setResult(payload);
@@ -138,7 +203,7 @@ export function ImportWorkbench() {
           <select className="input" value={sourceType} onChange={(event) => setSourceType(event.target.value)}>
             <option value="manual">Manual Template</option>
             <option value="tally">Tally Export</option>
-            <option value="zoho">Zoho Payload</option>
+            <option value="zoho">Zoho Books Export</option>
           </select>
         </label>
 
@@ -151,8 +216,13 @@ export function ImportWorkbench() {
         </label>
 
         <label className="field">
-          <span>Upload file</span>
-          <input className="input" type="file" onChange={(event) => setSelectedFile(event.target.files?.[0] ?? null)} />
+          <span>Upload file <span style={{ opacity: 0.5, fontSize: "0.85em" }}>(.csv, .xlsx, .xml, .json — max {MAX_FILE_SIZE_MB}MB)</span></span>
+          <input
+            className="input"
+            type="file"
+            accept=".csv,.xlsx,.xls,.xml,.json"
+            onChange={handleFileChange}
+          />
         </label>
 
         <label className="field">
@@ -168,9 +238,16 @@ export function ImportWorkbench() {
         <button className="button secondary" disabled={isSubmitting || !selectedFile} onClick={() => void runImport(false)}>
           Upload Selected File
         </button>
+        <a href="/api/templates/download" className="button secondary" download style={{ textDecoration: "none" }}>
+          ↓ Download Template
+        </a>
       </div>
 
-      {error ? <div className="status-copy error">{error}</div> : null}
+      {error ? (
+        <div className="status-copy error" style={{ whiteSpace: "pre-wrap" }}>
+          {error}
+        </div>
+      ) : null}
 
       {result ? (
         <div className="result-card">

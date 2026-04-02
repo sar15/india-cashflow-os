@@ -6,11 +6,7 @@ const sources = [
     title: "Tally exports",
     body: "Outstanding ledgers, debtors, creditors, day book, and trial balance imports are the fastest route for most Indian SMEs.",
     details: "Deterministic parsing first, AI fallback later only when confidence is low."
-  },
-  {
-    title: "Zoho Books export",
-    body: "Upload your Zoho Books JSON export. Invoice, bill, contact, and payment data is parsed automatically.",
-    details: "Export from Zoho Books → Upload the JSON file → Review and confirm."
+
   },
   {
     title: "Manual template",
@@ -31,7 +27,7 @@ export default async function ImportsPage() {
     <AppShell activePath="/imports">
       <section className="hero-card">
         <span className="eyebrow">Step 1 · Upload Your Data</span>
-        <h1 className="page-title">Upload your Tally, Zoho, or manual export and get a 13-week cashflow forecast.</h1>
+        <h1 className="page-title">Upload your Tally or manual export and get a 13-week cashflow forecast.</h1>
         <p>
           Drop your Excel, CSV, or JSON export below. The platform parses it, flags anything that needs your review,
           and moves straight into rules and forecast generation.

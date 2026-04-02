@@ -6,7 +6,6 @@ from openpyxl import Workbook
 
 from cashflow_os.ingestion.parsers.manual_template import parse_manual_workbook
 from cashflow_os.ingestion.parsers.tally_export import parse_tally_file
-from cashflow_os.ingestion.parsers.zoho_export import parse_zoho_payload
 from cashflow_os.utils.dates import parse_date_value
 
 
@@ -72,38 +71,6 @@ class TallyParsingTestCase(unittest.TestCase):
         self.assertTrue(any(issue.field_name == "due_date" for issue in bundle.import_batch.unresolved_issues))
 
 
-class ZohoExportParsingTestCase(unittest.TestCase):
-    def test_zoho_export_parses_balances_and_invalid_dates(self):
-        bundle = parse_zoho_payload(
-            org_id="demo-org",
-            filename="zoho.json",
-            payload={
-                "bank_balance": 1234.56,
-                "invoices": [
-                    {
-                        "invoice_number": "INV-1001",
-                        "customer_name": "Sharma Retail",
-                        "balance": 5500,
-                        "date": "not-a-date",
-                        "due_date": "2026-04-10",
-                    }
-                ],
-                "bills": [
-                    {
-                        "bill_number": "BILL-2001",
-                        "vendor_name": "Apex Steel",
-                        "total": 2500,
-                        "date": "2026-04-08",
-                        "due_date": "99/04/2026",
-                    }
-                ],
-            },
-        )
-
-        self.assertEqual(bundle.bank_balance.balance_minor_units, 123456)
-        self.assertEqual(len(bundle.events), 2)
-        self.assertTrue(any(issue.field_name == "date" for issue in bundle.import_batch.unresolved_issues))
-        self.assertTrue(any(issue.field_name == "due_date" for issue in bundle.import_batch.unresolved_issues))
 
 
 if __name__ == "__main__":

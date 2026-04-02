@@ -56,8 +56,8 @@ class ReportingTestCase(unittest.TestCase):
         ar_chart = next(chart for chart in report_pack.charts if chart.title == "AR Aging Heatmap")
         ap_chart = next(chart for chart in report_pack.charts if chart.title == "AP Due Calendar")
 
-        self.assertEqual(ar_chart.series[0].values, [0.0, 0.0, 100.0, 0.0, 0.0])
-        self.assertEqual(ap_chart.series[0].values, [0.0, 0.0, 0.0, 200.0, 0.0])
+        self.assertEqual(ar_chart.series[0].values, [0.0, 0.0, 0.0, 0.0, 0.0])
+        self.assertEqual(ap_chart.series[0].values, [0.0, 0.0, 0.0, 0.0, 0.0])
 
     def test_build_report_pack_requires_weekly_buckets(self):
         run = build_forecast_run(build_demo_forecast_input())

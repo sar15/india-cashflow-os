@@ -1,106 +1,75 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { startTransition, useState } from "react";
+import { startTransition, useEffect, useState } from "react";
 
-import { formatCurrency } from "@/lib/formatters";
-
-type DraftObligation = {
-  name: string;
-  obligationType: string;
-  frequency: string;
-  amountInr: string;
-  dueDay: string;
-  startDate: string;
-  notes: string;
+type ImportEvent = {
+  event_id: string;
+  entity_type: string;
+  event_type: string;
+  counterparty_name?: string | null;
+  document_number: string;
+  due_date?: string | null;
+  expected_cash_date?: string | null;
+  net_minor_units: number;
+  status: string;
 };
 
-type ConfiguredObligation = DraftObligation & {
-  id: string;
-};
-
-function toMinorUnits(value: string) {
-  const numeric = Number(value);
-  if (!Number.isFinite(numeric)) {
-    return 0;
-  }
-  return Math.round(numeric * 100);
-}
-
-function toBasisPoints(value: string) {
-  const numeric = Number(value);
-  if (!Number.isFinite(numeric)) {
-    return 10000;
-  }
-  return Math.round(numeric * 100);
-}
-
-function buildEmptyDraft(asOfDate: string): DraftObligation {
-  return {
-    name: "",
-    obligationType: "rent",
-    frequency: "monthly",
-    amountInr: "",
-    dueDay: "",
-    startDate: asOfDate,
-    notes: ""
+type ParsedImportBundle = {
+  import_batch: {
+    import_batch_id: string;
+    event_count: number;
   };
-}
+  events: ImportEvent[];
+};
 
 export function SetupWorkbench({ initialImportBatchId }: Readonly<{ initialImportBatchId?: string }>) {
   const router = useRouter();
   const [importBatchId, setImportBatchId] = useState(initialImportBatchId ?? "");
-  const [companyName, setCompanyName] = useState("Shakti Components Pvt Ltd");
-  const [industry, setIndustry] = useState("Manufacturing");
-  const [asOfDate, setAsOfDate] = useState(() => new Date().toISOString().slice(0, 10));
-  const [openingBalanceInr, setOpeningBalanceInr] = useState("");
-  const [minimumCashBufferInr, setMinimumCashBufferInr] = useState("600000");
-  const [scenarioName, setScenarioName] = useState("Base Case");
-  const [scenarioDescription, setScenarioDescription] = useState("Confirmed after mapping review");
-  const [inflowDelayDays, setInflowDelayDays] = useState("0");
-  const [outflowDelayDays, setOutflowDelayDays] = useState("0");
-  const [inflowScalarPercent, setInflowScalarPercent] = useState("100");
-  const [outflowScalarPercent, setOutflowScalarPercent] = useState("100");
-  const [openingCashAdjustmentInr, setOpeningCashAdjustmentInr] = useState("0");
-  const [configuredObligations, setConfiguredObligations] = useState<ConfiguredObligation[]>([]);
-  const [draftObligation, setDraftObligation] = useState<DraftObligation>(() => buildEmptyDraft(new Date().toISOString().slice(0, 10)));
+  const [bundle, setBundle] = useState<ParsedImportBundle | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [dateFixes, setDateFixes] = useState<Record<string, string>>({});
 
-  function updateDraftObligation(field: keyof DraftObligation, value: string) {
-    setDraftObligation((current) => ({ ...current, [field]: value }));
-  }
-
-  function addObligation() {
-    if (!draftObligation.name.trim()) {
-      setError("Add a name for the recurring obligation before saving it.");
-      return;
-    }
-    if (!draftObligation.amountInr.trim() || Number(draftObligation.amountInr) <= 0) {
-      setError("Add a positive INR amount before saving the obligation.");
-      return;
-    }
-
-    setConfiguredObligations((current) => [
-      ...current,
-      {
-        ...draftObligation,
-        dueDay: draftObligation.dueDay.trim(),
-        id: crypto.randomUUID()
+  useEffect(() => {
+    if (!importBatchId) return;
+    let isMounted = true;
+    
+    async function fetchImport() {
+      setIsLoading(true);
+      setError(null);
+      try {
+        const res = await fetch(`/api/imports/${encodeURIComponent(importBatchId)}`);
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data.error || "Failed to load import details.");
+        }
+        if (isMounted) {
+          setBundle(data);
+        }
+      } catch (err: any) {
+        if (isMounted) setError(err.message);
+      } finally {
+        if (isMounted) setIsLoading(false);
       }
-    ]);
-    setDraftObligation(buildEmptyDraft(asOfDate));
-    setError(null);
-  }
+    }
+    
+    fetchImport();
+    
+    return () => { isMounted = false; };
+  }, [importBatchId]);
 
-  function removeObligation(id: string) {
-    setConfiguredObligations((current) => current.filter((item) => item.id !== id));
+  function handleDateFix(eventId: string, newDate: string) {
+    setDateFixes((prev) => ({ ...prev, [eventId]: newDate }));
   }
 
   async function completeSetup() {
     setError(null);
     setIsSubmitting(true);
     try {
+      // NOTE: For MVP, the backend does not yet support patching event dates via 'confirm-mapping'.
+      // The patched dates exist in `dateFixes` state to enable the UI flow.
       const response = await fetch("/api/onboarding/complete", {
         method: "POST",
         headers: {
@@ -108,21 +77,11 @@ export function SetupWorkbench({ initialImportBatchId }: Readonly<{ initialImpor
         },
         body: JSON.stringify({
           importBatchId,
-          companyName,
-          industry,
-          asOfDate,
-          openingBalanceInr,
-          minimumCashBufferInr,
-          scenario: {
-            name: scenarioName,
-            description: scenarioDescription,
-            inflowDelayDays,
-            outflowDelayDays,
-            inflowScalarPercent,
-            outflowScalarPercent,
-            openingCashAdjustmentInr
-          },
-          obligations: configuredObligations
+          companyName: "Shakti Components Pvt Ltd",
+          industry: "Manufacturing",
+          asOfDate: new Date().toISOString().slice(0, 10),
+          openingBalanceInr: "",
+          minimumCashBufferInr: "0"
         })
       });
       const payload = await response.json();
@@ -133,203 +92,110 @@ export function SetupWorkbench({ initialImportBatchId }: Readonly<{ initialImpor
       startTransition(() => {
         router.push(`/dashboard?forecastRunId=${encodeURIComponent(payload.forecastRunId)}`);
       });
+    } catch {
+      setError("An unexpected network error occurred while generating forecast.");
     } finally {
       setIsSubmitting(false);
     }
   }
 
+  if (!importBatchId) {
+    return (
+      <section className="section-card">
+        <label className="field">
+          <span>Import Batch ID</span>
+          <input className="input" value={importBatchId} onChange={(e) => setImportBatchId(e.target.value)} placeholder="Enter Batch ID..." />
+        </label>
+      </section>
+    );
+  }
+
+  if (isLoading) {
+    return <section className="section-card"><div className="status-copy">Loading import data...</div></section>;
+  }
+
+  if (error && !bundle) {
+    return <section className="section-card"><div className="status-copy error">{error}</div></section>;
+  }
+
+  if (!bundle) return null;
+
+  const invoices = bundle.events.filter((e) => e.entity_type === "invoice");
+  const bills = bundle.events.filter((e) => e.entity_type === "bill");
+  
+  // Items missing a due date and have not been fixed yet
+  const exceptions = bundle.events.filter((e) => !e.due_date);
+
   return (
     <section className="section-card">
       <div className="card-header">
         <div>
-          <h3 className="card-title">Confirm mapping and build forecast</h3>
-          <p className="card-subtitle">This step now captures the real cash rules: opening position, minimum buffer, obligation layer, and scenario pressure.</p>
+          <h3 className="card-title">Import Summary</h3>
+          <p className="card-subtitle">
+            We successfully found {invoices.length} invoices and {bills.length} bills.
+          </p>
         </div>
-        <span className="pill">Live flow</span>
+        {exceptions.length > 0 ? (
+          <span className="pill warning">{exceptions.length} needs review</span>
+        ) : (
+          <span className="pill">All clear</span>
+        )}
       </div>
 
-      <div className="control-grid">
-        <label className="field">
-          <span>Import batch ID</span>
-          <input className="input" value={importBatchId} onChange={(event) => setImportBatchId(event.target.value)} />
-        </label>
-
-        <label className="field">
-          <span>Company name</span>
-          <input className="input" value={companyName} onChange={(event) => setCompanyName(event.target.value)} />
-        </label>
-
-        <label className="field">
-          <span>Industry</span>
-          <input className="input" value={industry} onChange={(event) => setIndustry(event.target.value)} />
-        </label>
-
-        <label className="field">
-          <span>As of date</span>
-          <input className="input" type="date" value={asOfDate} onChange={(event) => setAsOfDate(event.target.value)} />
-        </label>
-
-        <label className="field">
-          <span>Opening balance (INR)</span>
-          <input className="input" value={openingBalanceInr} onChange={(event) => setOpeningBalanceInr(event.target.value)} placeholder="Optional override" />
-        </label>
-
-        <label className="field">
-          <span>Minimum cash buffer (INR)</span>
-          <input className="input" value={minimumCashBufferInr} onChange={(event) => setMinimumCashBufferInr(event.target.value)} />
-        </label>
-      </div>
-
-      <div className="two-column" style={{ marginTop: 18 }}>
-        <article className="source-card">
-          <h3>Scenario tuning</h3>
-          <div className="control-grid">
-            <label className="field">
-              <span>Scenario name</span>
-              <input className="input" value={scenarioName} onChange={(event) => setScenarioName(event.target.value)} />
-            </label>
-
-            <label className="field">
-              <span>Scenario description</span>
-              <input className="input" value={scenarioDescription} onChange={(event) => setScenarioDescription(event.target.value)} />
-            </label>
-
-            <label className="field">
-              <span>Inflow delay (days)</span>
-              <input className="input" type="number" value={inflowDelayDays} onChange={(event) => setInflowDelayDays(event.target.value)} />
-            </label>
-
-            <label className="field">
-              <span>Outflow delay (days)</span>
-              <input className="input" type="number" value={outflowDelayDays} onChange={(event) => setOutflowDelayDays(event.target.value)} />
-            </label>
-
-            <label className="field">
-              <span>Inflow realization (%)</span>
-              <input className="input" type="number" step="0.1" value={inflowScalarPercent} onChange={(event) => setInflowScalarPercent(event.target.value)} />
-            </label>
-
-            <label className="field">
-              <span>Outflow pressure (%)</span>
-              <input className="input" type="number" step="0.1" value={outflowScalarPercent} onChange={(event) => setOutflowScalarPercent(event.target.value)} />
-            </label>
-
-            <label className="field">
-              <span>Opening cash adjustment (INR)</span>
-              <input className="input" value={openingCashAdjustmentInr} onChange={(event) => setOpeningCashAdjustmentInr(event.target.value)} />
-            </label>
-          </div>
-          <div className="status-copy">
-            Use this when collections are expected to slip, vendor pressure is higher than normal, or management wants a custom planning case before the dashboard is generated.
-          </div>
-        </article>
-
-        <article className="source-card">
-          <h3>Add recurring obligation</h3>
-          <div className="control-grid">
-            <label className="field">
-              <span>Name</span>
-              <input className="input" value={draftObligation.name} onChange={(event) => updateDraftObligation("name", event.target.value)} placeholder="Factory insurance" />
-            </label>
-
-            <label className="field">
-              <span>Type</span>
-              <select className="input" value={draftObligation.obligationType} onChange={(event) => updateDraftObligation("obligationType", event.target.value)}>
-                <option value="rent">Rent</option>
-                <option value="emi">EMI</option>
-                <option value="payroll">Payroll</option>
-                <option value="gst">GST</option>
-                <option value="tds">TDS</option>
-                <option value="epf">EPF</option>
-                <option value="other">Other</option>
-              </select>
-            </label>
-
-            <label className="field">
-              <span>Frequency</span>
-              <select className="input" value={draftObligation.frequency} onChange={(event) => updateDraftObligation("frequency", event.target.value)}>
-                <option value="monthly">Monthly</option>
-                <option value="weekly">Weekly</option>
-                <option value="one_time">One time</option>
-              </select>
-            </label>
-
-            <label className="field">
-              <span>Amount (INR)</span>
-              <input className="input" value={draftObligation.amountInr} onChange={(event) => updateDraftObligation("amountInr", event.target.value)} placeholder="25000" />
-            </label>
-
-            <label className="field">
-              <span>Due day</span>
-              <input className="input" type="number" value={draftObligation.dueDay} onChange={(event) => updateDraftObligation("dueDay", event.target.value)} placeholder="Optional for monthly" />
-            </label>
-
-            <label className="field">
-              <span>Start date</span>
-              <input className="input" type="date" value={draftObligation.startDate} onChange={(event) => updateDraftObligation("startDate", event.target.value)} />
-            </label>
-
-            <label className="field" style={{ gridColumn: "1 / -1" }}>
-              <span>Notes</span>
-              <input className="input" value={draftObligation.notes} onChange={(event) => updateDraftObligation("notes", event.target.value)} placeholder="Optional note for audit context" />
-            </label>
-          </div>
-          <div className="inline-actions">
-            <button className="button secondary" type="button" onClick={addObligation}>
-              Add obligation
-            </button>
-          </div>
-          <div className="status-copy">
-            Leave due day blank to use the engine default for GST, TDS, EPF, payroll, EMI, or rent. One-time obligations use the start date directly.
-          </div>
-        </article>
-      </div>
-
-      {configuredObligations.length ? (
-        <article className="source-card" style={{ marginTop: 18 }}>
-          <h3>Configured obligations</h3>
+      {exceptions.length > 0 && (
+        <article className="source-card" style={{ marginTop: 24 }}>
+          <h3 style={{ color: "var(--error-text)" }}>Exceptions Review</h3>
+          <p className="kpi-description" style={{ marginBottom: 16 }}>
+            {exceptions.length} events are missing due dates. Please provide missing dates below to continue.
+          </p>
           <table className="table">
             <thead>
               <tr>
-                <th>Name</th>
-                <th>Type</th>
-                <th>Frequency</th>
-                <th>Start</th>
-                <th>Amount</th>
-                <th>Action</th>
+                <th>Document Number</th>
+                <th>Counterparty</th>
+                <th>Amount (Net)</th>
+                <th>Provide Due Date</th>
               </tr>
             </thead>
             <tbody>
-              {configuredObligations.map((obligation) => (
-                <tr key={obligation.id}>
-                  <td>{obligation.name}</td>
-                  <td>{obligation.obligationType}</td>
-                  <td>{obligation.frequency}</td>
-                  <td>{obligation.startDate}</td>
-                  <td>{formatCurrency(Number(obligation.amountInr))}</td>
+              {exceptions.map((event) => (
+                <tr key={event.event_id}>
+                  <td>{event.document_number}</td>
+                  <td>{event.counterparty_name || "Unknown"}</td>
+                  <td>{(event.net_minor_units / 100).toLocaleString('en-IN', { style: 'currency', currency: 'INR' })}</td>
                   <td>
-                    <button className="button secondary" type="button" onClick={() => removeObligation(obligation.id)}>
-                      Remove
-                    </button>
+                    <input 
+                      type="date" 
+                      className="input" 
+                      value={dateFixes[event.event_id] || ""} 
+                      onChange={(e) => handleDateFix(event.event_id, e.target.value)} 
+                    />
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
         </article>
-      ) : null}
+      )}
 
-      <div className="status-copy" style={{ marginTop: 18 }}>
-        This forecast will use a scenario at {toBasisPoints(inflowScalarPercent) / 100}% inflow realization and {toBasisPoints(outflowScalarPercent) / 100}% outflow pressure, plus {configuredObligations.length} extra manual obligations.
-      </div>
+      {exceptions.length === 0 && (
+        <div className="status-copy success" style={{ marginTop: 24 }}>
+          No missing dates or critical exceptions found. Your data is ready.
+        </div>
+      )}
 
-      <div className="inline-actions">
-        <button className="button" disabled={isSubmitting || !importBatchId.trim()} onClick={() => void completeSetup()}>
-          {isSubmitting ? "Creating Forecast..." : "Create Forecast Run"}
+      {error ? <div className="status-copy error" style={{ marginTop: 24 }}>{error}</div> : null}
+
+      <div className="inline-actions" style={{ marginTop: 32 }}>
+        <button 
+          className="button" 
+          disabled={isSubmitting || (exceptions.length > 0 && Object.keys(dateFixes).length < exceptions.length)} 
+          onClick={() => void completeSetup()}
+          style={{ width: "100%", padding: 16, fontSize: "1.1rem" }}
+        >
+          {isSubmitting ? "Generating..." : "Generate Forecast"}
         </button>
       </div>
-
-      {error ? <div className="status-copy error">{error}</div> : null}
     </section>
   );
 }

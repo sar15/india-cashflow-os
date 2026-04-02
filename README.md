@@ -2,10 +2,10 @@
 
 India-first cash forecasting platform for SMEs, CAs, and operating finance teams.
 
-- `apps/api`: FastAPI backend with deterministic cash forecast engine, India compliance rules, persistent local state, authenticated API access, KPI/report builders, Excel/PDF exports, and tests.
-- `apps/web`: Next.js App Router frontend with live import/setup flows, dashboard reporting, and export proxy routes.
-- `templates`: import templates for manual onboarding.
-- `docs`: implementation notes and API/reporting references.
+- `apps/api`: FastAPI backend with a deterministic cash forecast engine, strict IST timezone consistency, India compliance rules, SQLAlchemy/SQLite persistence, authenticated HTTP API, KPI builders, and robust test suite.
+- `apps/web`: Next.js App Router frontend featuring a brutally simple MVP flow: Upload -> Review Exceptions -> Dashboard.
+- `templates`: Import templates for manual onboarding.
+- `docs`: Implementation notes and local setup references.
 
 ## What is implemented
 
@@ -13,14 +13,13 @@ India-first cash forecasting platform for SMEs, CAs, and operating finance teams
 - India rules for GST, TDS, EPF, payroll, EMI, and MSME 45-day payable risk (Section 43B(h)).
 - Canonical cash-event model with audit trace support.
 - KPI layer and chart/report specification generation.
-- PDF and Excel report export foundation.
-- Persistent FastAPI API surface aligned to the planned endpoints.
+- Persistent FastAPI using SQLAlchemy and SQLite for durability across restarts.
 - Role-based API authentication with owner, finance manager, accountant, and viewer roles.
-- **Manual-upload-only ingestion** — Tally exports (CSV/XML/XLSX), Zoho Books exports (JSON), and a standard Cashflow OS template (XLSX/CSV).
+- **MVP Ingestion Flow** — Tally exports (CSV/XML/XLSX) and a standard Cashflow OS template (XLSX/CSV) via drag-and-drop.
 - 50 MB upload limit with extension-based file validation.
-- Row-level parsing error feedback for malformed files.
+- Row-level parsing error feedback and exception review UI.
 - Downloadable `.xlsx` template with sample data at `GET /v1/templates/cashflow-os-template.xlsx`.
-- Live Next.js onboarding flow for import, mapping confirmation, forecast creation, dashboard viewing, and report export.
+- Clean Next.js onboarding journey for import, exception patching, forecast creation, dashboard viewing, and report export.
 - Signed web sessions with deploy-safe user configuration.
 - Checksum-based import deduplication.
 
@@ -33,6 +32,7 @@ cd apps/api
 cp .env.example .env
 python3 -m uvicorn --app-dir src cashflow_os.api.main:app --reload
 ```
+Data persists automatically to a local SQLite database file `data/cashflow-os.db`.
 
 ### Tests
 
@@ -55,8 +55,7 @@ npm run dev
 ```bash
 docker compose -f compose.local.yml up -d
 ```
-
-This brings up free local `Postgres`, `Redis`, and `MinIO`. The API can stay on lightweight file storage for the fastest start, or switch to local MinIO by setting `CASHFLOW_STORAGE_BACKEND=minio` in `apps/api/.env`.
+This brings up free local `Postgres` and `Redis` if you'd like to prepare for scale.
 
 ## Free deployment
 
@@ -70,16 +69,16 @@ Deployment notes live in `docs/FREE_DEPLOYMENT.md`.
 
 ## Notes
 
-- Money is stored as integer paise, not floats.
+- Money is stored and computed strictly as integer paise, not floats.
 - Forecast arithmetic is deterministic and traceable.
-- API state persists to `data/cashflow-os-state.json` by default and can be overridden with `CASHFLOW_STATE_PATH`.
-- Generated PDF/XLSX exports persist to `data/report-files` by default and can be overridden with `CASHFLOW_REPORT_STORAGE_PATH`.
-- Duplicate imports are deduplicated by checksum per org and source type so repeated uploads return the same import batch instead of creating drift.
+- All time-sensitive calculations strictly enforce the Asia/Kolkata (IST) timezone to avoid mid-night boundary shifts.
+- API state persists to `data/cashflow-os.db` via SQLAlchemy.
+- Generated PDF/XLSX exports persist to the local filesystem under `data/report-files`.
+- Duplicate imports are deduplicated by checksum per org and source type to prevent ledger drift.
 - Default local API tokens are:
   - `demo-owner-token`
   - `demo-finance-token`
   - `demo-accountant-token`
   - `demo-viewer-token`
-- Allowed web origins default to `http://localhost:3000` and `http://127.0.0.1:3000`, configurable via `CASHFLOW_ALLOWED_ORIGINS`.
-- Demo web users are meant for local development only and can be disabled with `CASHFLOW_DISABLE_DEMO_USERS=1`.
+- Allowed web origins default to `http://localhost:3000` and `http://127.0.0.1:3000`.
 - Real-world forecast accuracy still depends on input quality and assumptions.

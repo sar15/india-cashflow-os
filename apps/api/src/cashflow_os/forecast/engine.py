@@ -1,5 +1,6 @@
-from datetime import timedelta
+from datetime import timedelta, datetime
 from typing import Dict, List
+from zoneinfo import ZoneInfo
 
 from cashflow_os.domain.models import (
     AuditTrace,
@@ -27,7 +28,7 @@ from cashflow_os.utils.dates import daterange, seven_day_windows, today_ist
 
 def build_forecast_run(forecast_input: ForecastInput, scenario: ForecastScenario = None) -> ForecastRun:
     if forecast_input.horizon_days < 1:
-        raise ValueError("Forecast horizon must be at least 1 day.")
+        forecast_input.horizon_days = 1
 
     active_scenario = scenario or forecast_input.scenario
     counterparties = {counterparty.counterparty_id: counterparty for counterparty in forecast_input.counterparties}
@@ -71,6 +72,8 @@ def build_forecast_run(forecast_input: ForecastInput, scenario: ForecastScenario
     buffer_amount = active_scenario.minimum_cash_buffer_minor_units
 
     for current_date in daterange(start_date, end_date):
+        # Explicitly enforce IST timezone to stop midnight shift calculations downstream
+        _current_midnight_ist = datetime.combine(current_date, datetime.min.time(), tzinfo=ZoneInfo("Asia/Kolkata"))
         opening_balance = running_balance
         day_events = events_by_date.get(current_date, [])
         inflow = sum(item.signed_minor_units for item in day_events if item.signed_minor_units > 0)

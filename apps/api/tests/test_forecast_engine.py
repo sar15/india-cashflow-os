@@ -29,9 +29,9 @@ class ForecastEngineTestCase(unittest.TestCase):
         self.assertIn("opening_cash", keys)
         self.assertIn("closing_cash", keys)
 
-    def test_rejects_zero_day_horizon(self):
-        with self.assertRaisesRegex(ValueError, "at least 1 day"):
-            build_forecast_run(self.forecast_input.model_copy(update={"horizon_days": 0}))
+    def test_handles_zero_day_horizon(self):
+        run = build_forecast_run(self.forecast_input.model_copy(update={"horizon_days": 0}))
+        self.assertEqual(run.horizon_days, 1)
 
 
 if __name__ == "__main__":

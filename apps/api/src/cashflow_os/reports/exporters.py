@@ -1,5 +1,5 @@
 from io import BytesIO
-from typing import List
+from typing import List, Union
 
 import xlsxwriter
 from reportlab.graphics.charts.barcharts import VerticalBarChart
@@ -63,9 +63,10 @@ def _bar_chart(run: ForecastRun) -> Drawing:
     return drawing
 
 
-def export_pdf(run: ForecastRun, report_pack: ReportPack) -> bytes:
-    buffer = BytesIO()
-    document = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=1.5 * cm, leftMargin=1.5 * cm, topMargin=1.2 * cm, bottomMargin=1.2 * cm)
+from pathlib import Path
+
+def export_pdf(run: ForecastRun, report_pack: ReportPack, output_path: Union[str, Path]) -> None:
+    document = SimpleDocTemplate(str(output_path), pagesize=A4, rightMargin=1.5 * cm, leftMargin=1.5 * cm, topMargin=1.2 * cm, bottomMargin=1.2 * cm)
     styles = getSampleStyleSheet()
     title_style = ParagraphStyle(
         "CashflowTitle",
@@ -142,12 +143,10 @@ def export_pdf(run: ForecastRun, report_pack: ReportPack) -> bytes:
         story.append(Paragraph("• {note}".format(note=note), body_style))
 
     document.build(story)
-    return buffer.getvalue()
 
 
-def export_excel(run: ForecastRun, report_pack: ReportPack) -> bytes:
-    buffer = BytesIO()
-    workbook = xlsxwriter.Workbook(buffer, {"in_memory": True})
+def export_excel(run: ForecastRun, report_pack: ReportPack, output_path: Union[str, Path]) -> None:
+    workbook = xlsxwriter.Workbook(str(output_path))
     summary = workbook.add_worksheet("Summary")
     weekly = workbook.add_worksheet("Weekly Forecast")
     alerts_sheet = workbook.add_worksheet("Alerts")
@@ -241,5 +240,4 @@ def export_excel(run: ForecastRun, report_pack: ReportPack) -> bytes:
             trace_sheet.write(row_index, 4, "-", cell_format)
 
     workbook.close()
-    return buffer.getvalue()
 

@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 STATE_DIR = tempfile.mkdtemp(prefix="cashflow-os-api-tests-")
-os.environ["CASHFLOW_STATE_PATH"] = str(Path(STATE_DIR) / "state.json")
+os.environ["DATABASE_URL"] = "sqlite:///" + str(Path(STATE_DIR) / "cashflow.db")
 os.environ["CASHFLOW_REPORT_STORAGE_PATH"] = str(Path(STATE_DIR) / "report-files")
 
 from fastapi.testclient import TestClient
@@ -20,6 +20,11 @@ class ApiTestCase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.client = TestClient(app)
+        cls.client.__enter__()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.client.__exit__(None, None, None)
 
     def test_health(self):
         response = self.client.get("/health")
@@ -67,7 +72,7 @@ class ApiTestCase(unittest.TestCase):
         self.assertGreater(len(xlsx_response.content), 100)
 
     def test_state_file_is_created(self):
-        self.assertTrue(Path(os.environ["CASHFLOW_STATE_PATH"]).exists())
+        self.assertTrue(Path(os.environ["DATABASE_URL"].replace("sqlite:///", "")).exists())
 
     def test_duplicate_import_returns_existing_batch(self):
         payload = {

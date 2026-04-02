@@ -2,10 +2,9 @@
 
 This is the recommended free path for local development on a MacBook Air or similar machine:
 
-- `Postgres` in Docker for the future relational path
-- `Redis` in Docker for future background jobs and queue work
-- `MinIO` in Docker for free S3-compatible object storage
-- the API and web app running directly on your machine for the fastest feedback loop
+- `Postgres` and `Redis` in Docker for future scale paths
+- The API backend powered by local SQLite file storage for immediate portability
+- The Next.js web app running directly on your machine for the fastest frontend feedback loop
 
 ## Start the local infra
 
@@ -13,14 +12,7 @@ This is the recommended free path for local development on a MacBook Air or simi
 docker compose -f compose.local.yml up -d
 ```
 
-The local services use development-only defaults:
-
-- Postgres: database `cashflow_os`, user `cashflow`, password `cashflow`
-- Redis: `redis://127.0.0.1:6379`
-- MinIO API: `http://127.0.0.1:9000`
-- MinIO console: `http://127.0.0.1:9001`
-- MinIO credentials: `minioadmin` / `minioadmin`
-- MinIO bucket: `cashflow-os-local`
+The local services use development-only defaults, currently providing Postgres and Redis should you opt to deploy background jobs later.
 
 ## Run the API
 
@@ -31,16 +23,9 @@ python3 -m uvicorn --app-dir src cashflow_os.api.main:app --reload
 ```
 
 Fastest start:
-
-- keep `CASHFLOW_STORAGE_BACKEND=local`
-- state stays in `data/cashflow-os-state.json`
-- report files stay in `data/report-files`
-
-Local object storage path:
-
-- set `CASHFLOW_STORAGE_BACKEND=minio`
-- keep the default S3 env vars from `apps/api/.env.example`
-- state and report files will persist to local MinIO instead of the repo `data/` folder
+- SQLAlchemy will cleanly instantiate `cashflow-os.db` in `apps/api/data/cashflow-os.db`
+- API state persists there locally, so restarts won't blow away configurations.
+- Generated PDF and XLSX exports will fall comfortably into `data/report-files`.
 
 ## Run the web app
 
@@ -50,20 +35,9 @@ cp .env.example .env.local
 npm run dev
 ```
 
-## Run the desktop sync agent
+## Desktop Agent Status
 
-```bash
-cd apps/desktop_agent
-cp .env.example .env
-python3 main.py
-```
-
-The desktop agent:
-
-- registers the machine through `/v1/desktop-agents/register`
-- sends heartbeats through `/v1/desktop-agents/{id}/heartbeat`
-- watches a local folder with lightweight polling
-- uploads new supported files through `/v1/imports`
+_Note: The desktop app agent previously included in this repo for automated sync has been decommissioned. Ingestions are constrained strictly to web uploads._
 
 ## Gemini key
 

@@ -10,7 +10,7 @@ from typing import Optional, Union
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from starlette.concurrency import run_in_threadpool
 
 from cashflow_os.api.auth import AuthPrincipal, ensure_org_access, require_roles
@@ -20,9 +20,8 @@ from cashflow_os.api.schemas import (
     ObligationSetupPayload,
     ScenarioSetupPayload,
 )
-from cashflow_os.api.store import InMemoryStore
-from cashflow_os.db.engine import dispose_engine, get_database_url, health_check as db_health_check, init_engine, is_postgres_available
-from cashflow_os.db.repository import PostgresRepository
+from cashflow_os.db.engine import dispose_engine, get_database_url, health_check as db_health_check, init_engine, is_database_available
+from cashflow_os.db.repository import SQLiteRepository
 from cashflow_os.domain.models import (
     BankBalanceSnapshot,
     ChartTraceResponse,
@@ -49,27 +48,21 @@ from cashflow_os.reports.traces import resolve_report_chart_trace
 logging.basicConfig(level=os.getenv("CASHFLOW_LOG_LEVEL", "INFO"))
 LOGGER = logging.getLogger("cashflow_os.api")
 
-STORE: Union[InMemoryStore, PostgresRepository] = InMemoryStore()
+STORE: SQLiteRepository = SQLiteRepository()
 
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
-    global STORE
     application.state.upload_semaphore = asyncio.Semaphore(3)
-    database_url = get_database_url()
-    if database_url:
-        LOGGER.info("DATABASE_URL detected — initializing PostgreSQL backend.")
-        init_engine()
-        STORE = PostgresRepository()
-        STORE.seed_demo()
-        LOGGER.info("PostgreSQL repository ready.")
-    else:
-        LOGGER.info("No DATABASE_URL — using InMemoryStore (local dev mode).")
-        STORE = InMemoryStore()
+    LOGGER.info("Initializing database engine...")
+    init_engine()
+    STORE._create_tables()
+    LOGGER.info("Seeding demo data into repository.")
+    await run_in_threadpool(STORE.seed_demo)
     yield
-    if is_postgres_available():
+    if is_database_available():
         dispose_engine()
-        LOGGER.info("PostgreSQL connections closed.")
+        LOGGER.info("Database connections closed.")
 
 
 app = FastAPI(title="India Cashflow OS API", version="0.2.0", lifespan=lifespan)
@@ -136,7 +129,10 @@ def _select_forecast_run(
     scenario_id: Optional[str] = None,
 ):
     if forecast_run_id:
-        return STORE.forecast_runs.get(forecast_run_id)
+        return STORE.get_forecast_run(forecast_run_id)
+
+    if org_id and not scenario_id:
+        return STORE.get_latest_forecast_run(org_id)
 
     runs = list(STORE.forecast_runs.values())
     if org_id:
@@ -247,8 +243,8 @@ def root():
 
 @app.get("/health")
 def health() -> dict:
-    backend = "postgresql" if is_postgres_available() else "in_memory"
-    db_ok = db_health_check() if is_postgres_available() else True
+    backend = "database" if is_database_available() else "none"
+    db_ok = db_health_check() if is_database_available() else False
     return {"status": "ok" if db_ok else "degraded", "backend": backend, "database_connected": db_ok}
 
 
@@ -543,7 +539,7 @@ def get_forecast_run(
     forecast_run_id: str,
     principal: AuthPrincipal = Depends(require_roles("owner", "finance_manager", "accountant", "viewer")),
 ):
-    run = STORE.forecast_runs.get(forecast_run_id)
+    run = STORE.get_forecast_run(forecast_run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="Forecast run not found")
     ensure_org_access(principal, run.org_id)
@@ -570,7 +566,7 @@ def get_cash_dashboard(
     if run is None:
         raise HTTPException(status_code=404, detail="Forecast run not found")
     ensure_org_access(principal, run.org_id)
-    forecast_input = STORE.forecast_inputs.get(run.forecast_run_id)
+    forecast_input = STORE.get_forecast_input(run.forecast_run_id)
     comparison_runs = build_standard_scenario_runs(forecast_input) if forecast_input is not None else None
     report_pack = build_report_pack(run, comparison_runs=comparison_runs)
     STORE.upsert_report(report_pack)
@@ -582,16 +578,23 @@ def create_report(
     request: ReportRequest,
     principal: AuthPrincipal = Depends(require_roles("owner", "finance_manager", "accountant")),
 ):
-    run = STORE.forecast_runs.get(request.forecast_run_id)
-    forecast_input = STORE.forecast_inputs.get(request.forecast_run_id)
+    run = STORE.get_forecast_run(request.forecast_run_id)
+    forecast_input = STORE.get_forecast_input(request.forecast_run_id)
     if run is None or forecast_input is None:
         raise HTTPException(status_code=404, detail="Forecast run not found")
     ensure_org_access(principal, run.org_id)
     comparison_runs = build_standard_scenario_runs(forecast_input) if request.include_scenarios else None
     report_pack = build_report_pack(run, comparison_runs=comparison_runs)
     STORE.upsert_report(report_pack)
-    STORE.cache_report_file(report_pack.report_id, "pdf", export_pdf(run, report_pack))
-    STORE.cache_report_file(report_pack.report_id, "xlsx", export_excel(run, report_pack))
+
+    pdf_path = STORE.get_report_file_path(report_pack.report_id, "pdf")
+    export_pdf(run, report_pack, pdf_path)
+    STORE.register_report_file(report_pack.report_id, "pdf")
+
+    xlsx_path = STORE.get_report_file_path(report_pack.report_id, "xlsx")
+    export_excel(run, report_pack, xlsx_path)
+    STORE.register_report_file(report_pack.report_id, "xlsx")
+
     return report_pack
 
 
@@ -601,19 +604,25 @@ def download_report(
     format: str = Query(pattern="^(pdf|xlsx)$"),
     principal: AuthPrincipal = Depends(require_roles("owner", "finance_manager", "accountant", "viewer")),
 ):
-    report_pack = STORE.reports.get(report_id)
+    report_pack = STORE.get_report(report_id)
     if report_pack is None:
         raise HTTPException(status_code=404, detail="Report export not found")
-    run = STORE.forecast_runs.get(report_pack.forecast_run_id)
+    run = STORE.get_forecast_run(report_pack.forecast_run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="Forecast run not found")
     ensure_org_access(principal, run.org_id)
-    content = STORE.read_report_file(report_id, format)
-    if content is None:
-        content = export_pdf(run, report_pack) if format == "pdf" else export_excel(run, report_pack)
-        STORE.cache_report_file(report_id, format, content)
+    
+    file_path = STORE.read_report_file(report_id, format)
+    if file_path is None:
+        file_path = STORE.get_report_file_path(report_id, format)
+        if format == "pdf":
+            export_pdf(run, report_pack, file_path)
+        else:
+            export_excel(run, report_pack, file_path)
+        STORE.register_report_file(report_id, format)
+        
     media_type = "application/pdf" if format == "pdf" else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    return Response(content=content, media_type=media_type)
+    return FileResponse(path=file_path, media_type=media_type, filename=file_path.name)
 
 
 @app.get("/v1/reports/{report_id}/charts/{chart_id}/trace", response_model=ChartTraceResponse)
@@ -623,10 +632,10 @@ def get_report_chart_trace(
     point_key: Optional[str] = Query(default=None),
     principal: AuthPrincipal = Depends(require_roles("owner", "finance_manager", "accountant", "viewer")),
 ):
-    report_pack = STORE.reports.get(report_id)
+    report_pack = STORE.get_report(report_id)
     if report_pack is None:
         raise HTTPException(status_code=404, detail="Report pack not found")
-    run = STORE.forecast_runs.get(report_pack.forecast_run_id)
+    run = STORE.get_forecast_run(report_pack.forecast_run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="Forecast run not found")
     ensure_org_access(principal, run.org_id)
@@ -644,7 +653,7 @@ def get_audit_trace(
     event_id: Optional[str] = None,
     principal: AuthPrincipal = Depends(require_roles("owner", "finance_manager", "accountant", "viewer")),
 ):
-    run = STORE.forecast_runs.get(forecast_run_id)
+    run = STORE.get_forecast_run(forecast_run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="Forecast run not found")
     ensure_org_access(principal, run.org_id)

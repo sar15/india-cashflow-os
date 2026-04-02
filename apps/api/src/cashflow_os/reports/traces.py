@@ -25,7 +25,9 @@ COMPLIANCE_ENTITY_TYPES = {
 
 
 def aging_bucket_label(run: ForecastRun, event: ResolvedCashEvent) -> str:
-    age_days = abs((event.scheduled_date - run.as_of_date).days)
+    age_days = (run.as_of_date - event.scheduled_date).days
+    if age_days < 0:
+        return "Not Due"
     if age_days <= 15:
         return "0-15"
     if age_days <= 30:

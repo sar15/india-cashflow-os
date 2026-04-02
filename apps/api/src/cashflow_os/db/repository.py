@@ -13,7 +13,9 @@ query capability.
 """
 
 import json
+import uuid
 from datetime import date
+from pathlib import Path
 from typing import Dict, List, Optional, Type, TypeVar
 
 from sqlalchemy import text
@@ -48,11 +50,168 @@ from cashflow_os.utils.money import to_minor_units
 ModelT = TypeVar("ModelT")
 
 
-class PostgresRepository:
+from pydantic import BaseModel
+
+ModelT = TypeVar("ModelT")
+
+def _clean(db_dict: dict, model_cls: Type[BaseModel]) -> dict:
+    return {k: v for k, v in db_dict.items() if k in model_cls.model_fields}
+
+class SQLiteRepository:
     """PostgreSQL-backed store using the cashflow schema."""
 
     def __init__(self) -> None:
-        self.report_file_cache: Dict[str, Dict[str, bytes]] = {}
+        from pathlib import Path
+        self.report_storage_path = Path(__file__).resolve().parents[3] / "data" / "reports"
+        self.report_storage_path.mkdir(parents=True, exist_ok=True)
+
+    def _create_tables(self) -> None:
+        with get_db_session() as session:
+            session.execute(text("""
+                CREATE TABLE IF NOT EXISTS organizations (
+                    org_id TEXT PRIMARY KEY,
+                    company_name TEXT NOT NULL,
+                    industry TEXT NOT NULL,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """))
+            session.execute(text("""
+                CREATE TABLE IF NOT EXISTS import_batches (
+                    import_batch_id TEXT PRIMARY KEY,
+                    org_id TEXT NOT NULL,
+                    source_type TEXT NOT NULL,
+                    filename TEXT,
+                    checksum TEXT,
+                    event_count INTEGER NOT NULL DEFAULT 0,
+                    counterparty_count INTEGER NOT NULL DEFAULT 0,
+                    obligation_count INTEGER NOT NULL DEFAULT 0,
+                    unresolved_issues TEXT NOT NULL DEFAULT '[]',
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """))
+            session.execute(text("""
+                CREATE TABLE IF NOT EXISTS counterparties (
+                    counterparty_id TEXT PRIMARY KEY,
+                    org_id TEXT NOT NULL,
+                    entity_name TEXT NOT NULL,
+                    relationship_type TEXT NOT NULL DEFAULT 'customer',
+                    is_msme_registered BOOLEAN NOT NULL DEFAULT 0,
+                    behavioral_delay_days INTEGER NOT NULL DEFAULT 0,
+                    collection_confidence DOUBLE PRECISION NOT NULL DEFAULT 0.85,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """))
+            session.execute(text("""
+                CREATE TABLE IF NOT EXISTS cash_events (
+                    event_id TEXT PRIMARY KEY,
+                    org_id TEXT NOT NULL,
+                    source_id TEXT NOT NULL,
+                    import_batch_id TEXT,
+                    event_type TEXT NOT NULL,
+                    entity_type TEXT NOT NULL DEFAULT 'invoice',
+                    counterparty_id TEXT,
+                    counterparty_name TEXT,
+                    document_number TEXT,
+                    document_date DATE,
+                    due_date DATE,
+                    expected_cash_date DATE,
+                    gross_minor_units BIGINT NOT NULL DEFAULT 0,
+                    tax_minor_units BIGINT NOT NULL DEFAULT 0,
+                    tds_minor_units BIGINT NOT NULL DEFAULT 0,
+                    net_minor_units BIGINT NOT NULL DEFAULT 0,
+                    currency TEXT NOT NULL DEFAULT 'INR',
+                    status TEXT NOT NULL DEFAULT 'open',
+                    source_confidence DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+                    mapping_confidence DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+                    rule_version TEXT,
+                    forecast_inclusion_status TEXT NOT NULL DEFAULT 'included',
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """))
+            session.execute(text("""
+                CREATE TABLE IF NOT EXISTS recurring_obligations (
+                    obligation_id TEXT PRIMARY KEY,
+                    org_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    obligation_type TEXT NOT NULL,
+                    frequency TEXT NOT NULL DEFAULT 'monthly',
+                    amount_minor_units BIGINT NOT NULL DEFAULT 0,
+                    due_day INTEGER,
+                    start_date DATE NOT NULL,
+                    end_date DATE,
+                    notes TEXT
+                )
+            """))
+            session.execute(text("""
+                CREATE TABLE IF NOT EXISTS bank_balance_snapshots (
+                    snapshot_id TEXT PRIMARY KEY,
+                    org_id TEXT NOT NULL,
+                    account_name TEXT NOT NULL DEFAULT 'Primary',
+                    as_of_date DATE NOT NULL,
+                    balance_minor_units BIGINT NOT NULL DEFAULT 0
+                )
+            """))
+            session.execute(text("""
+                CREATE TABLE IF NOT EXISTS inventory_snapshots (
+                    snapshot_id TEXT PRIMARY KEY,
+                    org_id TEXT NOT NULL,
+                    as_of_date DATE NOT NULL,
+                    inventory_minor_units BIGINT NOT NULL DEFAULT 0,
+                    raw_material_cover_days INTEGER NOT NULL DEFAULT 0
+                )
+            """))
+            session.execute(text("""
+                CREATE TABLE IF NOT EXISTS forecast_scenarios (
+                    scenario_id TEXT PRIMARY KEY,
+                    org_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    kind TEXT NOT NULL DEFAULT 'base',
+                    description TEXT,
+                    inflow_delay_days INTEGER NOT NULL DEFAULT 0,
+                    outflow_delay_days INTEGER NOT NULL DEFAULT 0,
+                    inflow_scalar_bps INTEGER NOT NULL DEFAULT 10000,
+                    outflow_scalar_bps INTEGER NOT NULL DEFAULT 10000,
+                    opening_cash_adjustment_minor_units BIGINT NOT NULL DEFAULT 0,
+                    minimum_cash_buffer_minor_units BIGINT NOT NULL DEFAULT 0,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """))
+            session.execute(text("""
+                CREATE TABLE IF NOT EXISTS forecast_runs (
+                    forecast_run_id TEXT PRIMARY KEY,
+                    org_id TEXT NOT NULL,
+                    as_of_date DATE NOT NULL,
+                    opening_balance_minor_units BIGINT NOT NULL DEFAULT 0,
+                    horizon_days INTEGER NOT NULL DEFAULT 91,
+                    calendar_version TEXT,
+                    rule_version TEXT,
+                    formula_version TEXT,
+                    scenario_snapshot TEXT NOT NULL DEFAULT '{}',
+                    profile_snapshot TEXT NOT NULL DEFAULT '{}',
+                    weekly_buckets TEXT NOT NULL DEFAULT '[]',
+                    resolved_events TEXT NOT NULL DEFAULT '[]',
+                    kpis TEXT NOT NULL DEFAULT '{}',
+                    alerts TEXT NOT NULL DEFAULT '[]',
+                    audit_trace TEXT NOT NULL DEFAULT '[]',
+                    input_snapshot TEXT NOT NULL DEFAULT '{}',
+                    generated_at DATETIME,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """))
+            session.execute(text("""
+                CREATE TABLE IF NOT EXISTS report_packs (
+                    report_id TEXT PRIMARY KEY,
+                    forecast_run_id TEXT NOT NULL,
+                    org_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    charts TEXT NOT NULL DEFAULT '[]',
+                    sections TEXT NOT NULL DEFAULT '[]',
+                    methodology_notes TEXT NOT NULL DEFAULT '[]',
+                    pdf_storage_path TEXT,
+                    xlsx_storage_path TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """))
 
     # ------------------------------------------------------------------
     # Organization
@@ -62,12 +221,12 @@ class PostgresRepository:
         with get_db_session() as session:
             session.execute(
                 text("""
-                    INSERT INTO cashflow.organizations (org_id, company_name, industry)
+                    INSERT INTO organizations (org_id, company_name, industry)
                     VALUES (:org_id, :company_name, :industry)
                     ON CONFLICT (org_id) DO UPDATE SET
                         company_name = EXCLUDED.company_name,
                         industry = EXCLUDED.industry,
-                        updated_at = now()
+                        updated_at = CURRENT_TIMESTAMP
                 """),
                 {"org_id": org_id, "company_name": company_name, "industry": industry},
             )
@@ -84,11 +243,11 @@ class PostgresRepository:
             self.ensure_org(batch.org_id)
             session.execute(
                 text("""
-                    INSERT INTO cashflow.import_batches
+                    INSERT INTO import_batches
                         (import_batch_id, org_id, source_type, filename, checksum,
                          event_count, counterparty_count, obligation_count, unresolved_issues)
                     VALUES (:id, :org_id, :source_type, :filename, :checksum,
-                            :event_count, :counterparty_count, :obligation_count, :issues::jsonb)
+                            :event_count, :counterparty_count, :obligation_count, :issues)
                     ON CONFLICT (import_batch_id) DO UPDATE SET
                         event_count = EXCLUDED.event_count,
                         counterparty_count = EXCLUDED.counterparty_count,
@@ -127,48 +286,48 @@ class PostgresRepository:
         with get_db_session() as session:
             if org_id:
                 row = session.execute(
-                    text("SELECT * FROM cashflow.import_batches WHERE import_batch_id = :id AND org_id = :org_id"),
+                    text("SELECT * FROM import_batches WHERE import_batch_id = :id AND org_id = :org_id"),
                     {"id": import_batch_id, "org_id": org_id},
                 ).mappings().first()
             else:
                 row = session.execute(
-                    text("SELECT * FROM cashflow.import_batches WHERE import_batch_id = :id"),
+                    text("SELECT * FROM import_batches WHERE import_batch_id = :id"),
                     {"id": import_batch_id},
                 ).mappings().first()
             if row is None:
                 return None
 
             events = [
-                CanonicalCashEvent.model_validate(dict(r))
+                CanonicalCashEvent.model_validate(_clean(dict(r), CanonicalCashEvent))
                 for r in session.execute(
-                    text("SELECT * FROM cashflow.cash_events WHERE import_batch_id = :id"),
+                    text("SELECT * FROM cash_events WHERE import_batch_id = :id"),
                     {"id": import_batch_id},
                 ).mappings().all()
             ] if True else []
 
             counterparties_rows = session.execute(
-                text("SELECT * FROM cashflow.counterparties WHERE org_id = :org_id"),
+                text("SELECT * FROM counterparties WHERE org_id = :org_id"),
                 {"org_id": row["org_id"]},
             ).mappings().all()
-            counterparties = [Counterparty.model_validate(dict(r)) for r in counterparties_rows]
+            counterparties = [Counterparty.model_validate(_clean(dict(r), Counterparty)) for r in counterparties_rows]
 
             obligations_rows = session.execute(
-                text("SELECT * FROM cashflow.recurring_obligations WHERE org_id = :org_id"),
+                text("SELECT * FROM recurring_obligations WHERE org_id = :org_id"),
                 {"org_id": row["org_id"]},
             ).mappings().all()
-            obligations = [RecurringObligation.model_validate(dict(r)) for r in obligations_rows]
+            obligations = [RecurringObligation.model_validate(_clean(dict(r), RecurringObligation)) for r in obligations_rows]
 
             bank_row = session.execute(
-                text("SELECT * FROM cashflow.bank_balance_snapshots WHERE org_id = :org_id ORDER BY as_of_date DESC LIMIT 1"),
+                text("SELECT * FROM bank_balance_snapshots WHERE org_id = :org_id ORDER BY as_of_date DESC LIMIT 1"),
                 {"org_id": row["org_id"]},
             ).mappings().first()
-            bank_balance = BankBalanceSnapshot.model_validate(dict(bank_row)) if bank_row else None
+            bank_balance = BankBalanceSnapshot.model_validate(_clean(dict(bank_row), BankBalanceSnapshot)) if bank_row else None
 
             inv_row = session.execute(
-                text("SELECT * FROM cashflow.inventory_snapshots WHERE org_id = :org_id ORDER BY as_of_date DESC LIMIT 1"),
+                text("SELECT * FROM inventory_snapshots WHERE org_id = :org_id ORDER BY as_of_date DESC LIMIT 1"),
                 {"org_id": row["org_id"]},
             ).mappings().first()
-            inventory = InventorySnapshot.model_validate(dict(inv_row)) if inv_row else None
+            inventory = InventorySnapshot.model_validate(_clean(dict(inv_row), InventorySnapshot)) if inv_row else None
 
             unresolved_issues = row["unresolved_issues"] if isinstance(row["unresolved_issues"], list) else json.loads(row["unresolved_issues"] or "[]")
 
@@ -197,7 +356,7 @@ class PostgresRepository:
         with get_db_session() as session:
             row = session.execute(
                 text("""
-                    SELECT import_batch_id FROM cashflow.import_batches
+                    SELECT import_batch_id FROM import_batches
                     WHERE org_id = :org_id AND source_type = :source_type AND checksum = :checksum
                     LIMIT 1
                 """),
@@ -214,7 +373,7 @@ class PostgresRepository:
     def _upsert_cash_event(self, session: Session, event: CanonicalCashEvent) -> None:
         session.execute(
             text("""
-                INSERT INTO cashflow.cash_events
+                INSERT INTO cash_events
                     (event_id, org_id, source_id, import_batch_id, event_type, entity_type,
                      counterparty_id, counterparty_name, document_number, document_date,
                      due_date, expected_cash_date, gross_minor_units, tax_minor_units,
@@ -228,7 +387,7 @@ class PostgresRepository:
                     net_minor_units = EXCLUDED.net_minor_units,
                     status = EXCLUDED.status,
                     expected_cash_date = EXCLUDED.expected_cash_date,
-                    updated_at = now()
+                    updated_at = CURRENT_TIMESTAMP
             """),
             {
                 "event_id": event.event_id,
@@ -263,7 +422,7 @@ class PostgresRepository:
     def _upsert_counterparty(self, session: Session, counterparty: Counterparty, org_id: str) -> None:
         session.execute(
             text("""
-                INSERT INTO cashflow.counterparties
+                INSERT INTO counterparties
                     (counterparty_id, org_id, entity_name, relationship_type,
                      is_msme_registered, behavioral_delay_days, collection_confidence)
                 VALUES (:id, :org_id, :name, :rel, :msme, :delay, :conf)
@@ -272,7 +431,7 @@ class PostgresRepository:
                     is_msme_registered = EXCLUDED.is_msme_registered,
                     behavioral_delay_days = EXCLUDED.behavioral_delay_days,
                     collection_confidence = EXCLUDED.collection_confidence,
-                    updated_at = now()
+                    updated_at = CURRENT_TIMESTAMP
             """),
             {
                 "id": counterparty.counterparty_id,
@@ -292,7 +451,7 @@ class PostgresRepository:
     def _upsert_obligation(self, session: Session, obligation: RecurringObligation) -> None:
         session.execute(
             text("""
-                INSERT INTO cashflow.recurring_obligations
+                INSERT INTO recurring_obligations
                     (obligation_id, org_id, name, obligation_type, frequency,
                      amount_minor_units, due_day, start_date, end_date, notes)
                 VALUES (:id, :org_id, :name, :type, :freq, :amount, :day, :start, :end, :notes)
@@ -321,10 +480,10 @@ class PostgresRepository:
     def get_obligations(self, org_id: str) -> List[RecurringObligation]:
         with get_db_session() as session:
             rows = session.execute(
-                text("SELECT * FROM cashflow.recurring_obligations WHERE org_id = :org_id"),
+                text("SELECT * FROM recurring_obligations WHERE org_id = :org_id"),
                 {"org_id": org_id},
             ).mappings().all()
-            return [RecurringObligation.model_validate(dict(r)) for r in rows]
+            return [RecurringObligation.model_validate(_clean(dict(r), RecurringObligation)) for r in rows]
 
     # ------------------------------------------------------------------
     # Bank / Inventory Snapshots
@@ -333,11 +492,12 @@ class PostgresRepository:
     def _upsert_bank_snapshot(self, session: Session, snapshot: BankBalanceSnapshot) -> None:
         session.execute(
             text("""
-                INSERT INTO cashflow.bank_balance_snapshots
+                INSERT INTO bank_balance_snapshots
                     (snapshot_id, org_id, account_name, as_of_date, balance_minor_units)
-                VALUES (gen_random_uuid()::text, :org_id, :account, :date, :balance)
+                VALUES (:snapshot_id, :org_id, :account, :date, :balance)
             """),
             {
+                "snapshot_id": str(uuid.uuid4()),
                 "org_id": snapshot.org_id,
                 "account": getattr(snapshot, "account_name", "Primary"),
                 "date": snapshot.as_of_date,
@@ -348,11 +508,12 @@ class PostgresRepository:
     def _upsert_inventory_snapshot(self, session: Session, snapshot: InventorySnapshot) -> None:
         session.execute(
             text("""
-                INSERT INTO cashflow.inventory_snapshots
+                INSERT INTO inventory_snapshots
                     (snapshot_id, org_id, as_of_date, inventory_minor_units, raw_material_cover_days)
-                VALUES (gen_random_uuid()::text, :org_id, :date, :inventory, :cover)
+                VALUES (:snapshot_id, :org_id, :date, :inventory, :cover)
             """),
             {
+                "snapshot_id": str(uuid.uuid4()),
                 "org_id": snapshot.org_id,
                 "date": snapshot.as_of_date,
                 "inventory": snapshot.inventory_minor_units,
@@ -368,7 +529,7 @@ class PostgresRepository:
         with get_db_session() as session:
             session.execute(
                 text("""
-                    INSERT INTO cashflow.forecast_scenarios
+                    INSERT INTO forecast_scenarios
                         (scenario_id, org_id, name, kind, description,
                          inflow_delay_days, outflow_delay_days,
                          inflow_scalar_bps, outflow_scalar_bps,
@@ -407,23 +568,17 @@ class PostgresRepository:
             self.ensure_org(run.profile.org_id, run.profile.company_name, run.profile.industry)
             session.execute(
                 text("""
-                    INSERT INTO cashflow.forecast_runs
-                        (forecast_run_id, org_id, as_of_date, opening_balance_minor_units,
-                         horizon_days, calendar_version, rule_version,
-                         scenario_snapshot, profile_snapshot,
-                         weekly_buckets, resolved_events, kpis, alerts, audit_trace,
-                         input_snapshot)
-                    VALUES (:id, :org_id, :as_of, :opening, :horizon,
-                            :cal_ver, :rule_ver,
-                            :scenario::jsonb, :profile::jsonb,
-                            :weekly::jsonb, :events::jsonb, :kpis::jsonb,
-                            :alerts::jsonb, :trace::jsonb, :input::jsonb)
+                    INSERT INTO forecast_runs 
+                        (forecast_run_id, org_id, as_of_date, opening_balance_minor_units, horizon_days, calendar_version, rule_version, formula_version, generated_at, scenario_snapshot, profile_snapshot, weekly_buckets, resolved_events, kpis, alerts, audit_trace, input_snapshot)
+                    VALUES (:id, :org_id, :as_of, :opening, :horizon, :cal_ver, :rule_ver, :form_ver, :gen_at, :scenario, :profile, :weekly, :events, :kpis, :alerts, :trace, :input)
                     ON CONFLICT (forecast_run_id) DO UPDATE SET
-                        weekly_buckets = EXCLUDED.weekly_buckets,
+                        as_of_date = EXCLUDED.as_of_date,weekly_buckets = EXCLUDED.weekly_buckets,
                         resolved_events = EXCLUDED.resolved_events,
                         kpis = EXCLUDED.kpis,
                         alerts = EXCLUDED.alerts,
-                        audit_trace = EXCLUDED.audit_trace
+                        audit_trace = EXCLUDED.audit_trace,
+                        formula_version = EXCLUDED.formula_version,
+                        generated_at = EXCLUDED.generated_at
                 """),
                 {
                     "id": run.forecast_run_id,
@@ -433,6 +588,8 @@ class PostgresRepository:
                     "horizon": run.horizon_days,
                     "cal_ver": run.calendar_version,
                     "rule_ver": run.rule_version,
+                    "form_ver": run.formula_version,
+                    "gen_at": run.generated_at.isoformat() if run.generated_at else None,
                     "scenario": json.dumps(run_json.get("scenario", {})),
                     "profile": json.dumps(run_json.get("profile", {})),
                     "weekly": json.dumps(run_json.get("weekly_buckets", [])),
@@ -448,12 +605,12 @@ class PostgresRepository:
         with get_db_session() as session:
             if org_id:
                 row = session.execute(
-                    text("SELECT * FROM cashflow.forecast_runs WHERE forecast_run_id = :id AND org_id = :org_id"),
+                    text("SELECT * FROM forecast_runs WHERE forecast_run_id = :id AND org_id = :org_id"),
                     {"id": forecast_run_id, "org_id": org_id},
                 ).mappings().first()
             else:
                 row = session.execute(
-                    text("SELECT * FROM cashflow.forecast_runs WHERE forecast_run_id = :id"),
+                    text("SELECT * FROM forecast_runs WHERE forecast_run_id = :id"),
                     {"id": forecast_run_id},
                 ).mappings().first()
             if row is None:
@@ -463,7 +620,7 @@ class PostgresRepository:
     def get_latest_forecast_run(self, org_id: str) -> Optional[ForecastRun]:
         with get_db_session() as session:
             row = session.execute(
-                text("SELECT * FROM cashflow.forecast_runs WHERE org_id = :org_id ORDER BY created_at DESC LIMIT 1"),
+                text("SELECT * FROM forecast_runs WHERE org_id = :org_id ORDER BY generated_at DESC, created_at DESC LIMIT 1"),
                 {"org_id": org_id},
             ).mappings().first()
             if row is None:
@@ -474,12 +631,12 @@ class PostgresRepository:
         with get_db_session() as session:
             if org_id:
                 row = session.execute(
-                    text("SELECT input_snapshot FROM cashflow.forecast_runs WHERE forecast_run_id = :id AND org_id = :org_id"),
+                    text("SELECT input_snapshot FROM forecast_runs WHERE forecast_run_id = :id AND org_id = :org_id"),
                     {"id": key, "org_id": org_id},
                 ).mappings().first()
             else:
                 row = session.execute(
-                    text("SELECT input_snapshot FROM cashflow.forecast_runs WHERE forecast_run_id = :id"),
+                    text("SELECT input_snapshot FROM forecast_runs WHERE forecast_run_id = :id"),
                     {"id": key},
                 ).mappings().first()
             if row is None:
@@ -499,6 +656,9 @@ class PostgresRepository:
 
         return ForecastRun.model_validate({
             "forecast_run_id": row["forecast_run_id"],
+            "org_id": row.get("org_id", "demo-org"),
+            "formula_version": row.get("formula_version", "v1.0"),
+            "generated_at": row.get("created_at") or row.get("generated_at"),
             "as_of_date": row["as_of_date"],
             "opening_balance_minor_units": row["opening_balance_minor_units"],
             "horizon_days": row["horizon_days"],
@@ -521,16 +681,16 @@ class PostgresRepository:
         report_json = report.model_dump(mode="json")
         with get_db_session() as session:
             run_row = session.execute(
-                text("SELECT org_id FROM cashflow.forecast_runs WHERE forecast_run_id = :id"),
+                text("SELECT org_id FROM forecast_runs WHERE forecast_run_id = :id"),
                 {"id": report.forecast_run_id},
             ).mappings().first()
             org_id = run_row["org_id"] if run_row else "demo-org"
 
             session.execute(
                 text("""
-                    INSERT INTO cashflow.report_packs
+                    INSERT INTO report_packs
                         (report_id, forecast_run_id, org_id, title, charts, sections, methodology_notes)
-                    VALUES (:id, :run_id, :org_id, :title, :charts::jsonb, :sections::jsonb, :notes::jsonb)
+                    VALUES (:id, :run_id, :org_id, :title, :charts, :sections, :notes)
                     ON CONFLICT (report_id) DO UPDATE SET
                         charts = EXCLUDED.charts,
                         sections = EXCLUDED.sections
@@ -550,12 +710,12 @@ class PostgresRepository:
         with get_db_session() as session:
             if org_id:
                 row = session.execute(
-                    text("SELECT * FROM cashflow.report_packs WHERE report_id = :id AND org_id = :org_id"),
+                    text("SELECT * FROM report_packs WHERE report_id = :id AND org_id = :org_id"),
                     {"id": report_id, "org_id": org_id},
                 ).mappings().first()
             else:
                 row = session.execute(
-                    text("SELECT * FROM cashflow.report_packs WHERE report_id = :id"),
+                    text("SELECT * FROM report_packs WHERE report_id = :id"),
                     {"id": report_id},
                 ).mappings().first()
             if row is None:
@@ -566,12 +726,12 @@ class PostgresRepository:
         with get_db_session() as session:
             if org_id:
                 row = session.execute(
-                    text("SELECT * FROM cashflow.report_packs WHERE forecast_run_id = :id AND org_id = :org_id ORDER BY created_at DESC LIMIT 1"),
+                    text("SELECT * FROM report_packs WHERE forecast_run_id = :id AND org_id = :org_id ORDER BY created_at DESC LIMIT 1"),
                     {"id": forecast_run_id, "org_id": org_id},
                 ).mappings().first()
             else:
                 row = session.execute(
-                    text("SELECT * FROM cashflow.report_packs WHERE forecast_run_id = :id ORDER BY created_at DESC LIMIT 1"),
+                    text("SELECT * FROM report_packs WHERE forecast_run_id = :id ORDER BY created_at DESC LIMIT 1"),
                     {"id": forecast_run_id},
                 ).mappings().first()
             if row is None:
@@ -593,23 +753,29 @@ class PostgresRepository:
             "methodology_notes": _parse_jsonb(row.get("methodology_notes", [])),
         })
 
-    def cache_report_file(self, report_id: str, file_format: str, content: bytes) -> None:
-        self.report_file_cache.setdefault(report_id, {})[file_format] = content
+    def get_report_file_path(self, report_id: str, file_format: str) -> Path:
+        self.report_storage_path.mkdir(parents=True, exist_ok=True)
+        return self.report_storage_path / f"{report_id}.{file_format}"
+
+    def register_report_file(self, report_id: str, file_format: str) -> None:
+        relative_path = f"data/reports/{report_id}.{file_format}"
         with get_db_session() as session:
-            path = "cashflow-reports/{report_id}.{fmt}".format(report_id=report_id, fmt=file_format)
             if file_format == "pdf":
                 session.execute(
-                    text("UPDATE cashflow.report_packs SET pdf_storage_path = :path WHERE report_id = :id"),
-                    {"path": path, "id": report_id},
+                    text("UPDATE report_packs SET pdf_storage_path = :path WHERE report_id = :id"),
+                    {"path": relative_path, "id": report_id},
                 )
             else:
                 session.execute(
-                    text("UPDATE cashflow.report_packs SET xlsx_storage_path = :path WHERE report_id = :id"),
-                    {"path": path, "id": report_id},
+                    text("UPDATE report_packs SET xlsx_storage_path = :path WHERE report_id = :id"),
+                    {"path": relative_path, "id": report_id},
                 )
 
-    def read_report_file(self, report_id: str, file_format: str) -> Optional[bytes]:
-        return self.report_file_cache.get(report_id, {}).get(file_format)
+    def read_report_file(self, report_id: str, file_format: str) -> Optional[Path]:
+        report_path = self.get_report_file_path(report_id, file_format)
+        if not report_path.exists():
+            return None
+        return report_path
 
 
     # ------------------------------------------------------------------
@@ -624,7 +790,7 @@ class PostgresRepository:
         try:
             with get_db_session() as session:
                 row = session.execute(
-                    text("SELECT COUNT(*) as cnt FROM cashflow.forecast_runs"),
+                    text("SELECT COUNT(*) as cnt FROM forecast_runs"),
                 ).mappings().first()
                 if row and row["cnt"] > 0:
                     return
@@ -648,7 +814,7 @@ class PostgresRepository:
     def forecast_runs(self) -> Dict[str, ForecastRun]:
         with get_db_session() as session:
             rows = session.execute(
-                text("SELECT * FROM cashflow.forecast_runs ORDER BY created_at DESC LIMIT 50"),
+                text("SELECT * FROM forecast_runs ORDER BY created_at DESC LIMIT 50"),
             ).mappings().all()
             return {row["forecast_run_id"]: self._row_to_forecast_run(dict(row)) for row in rows}
 
@@ -656,7 +822,7 @@ class PostgresRepository:
     def reports(self) -> Dict[str, ReportPack]:
         with get_db_session() as session:
             rows = session.execute(
-                text("SELECT * FROM cashflow.report_packs ORDER BY created_at DESC LIMIT 50"),
+                text("SELECT * FROM report_packs ORDER BY created_at DESC LIMIT 50"),
             ).mappings().all()
             return {row["report_id"]: self._row_to_report_pack(dict(row)) for row in rows}
 
@@ -665,7 +831,7 @@ class PostgresRepository:
         result = {}
         with get_db_session() as session:
             rows = session.execute(
-                text("SELECT import_batch_id FROM cashflow.import_batches ORDER BY created_at DESC LIMIT 50"),
+                text("SELECT import_batch_id FROM import_batches ORDER BY created_at DESC LIMIT 50"),
             ).mappings().all()
         for row in rows:
             bundle = self.get_import(row["import_batch_id"])
@@ -677,9 +843,9 @@ class PostgresRepository:
     def scenarios(self) -> Dict[str, ForecastScenario]:
         with get_db_session() as session:
             rows = session.execute(
-                text("SELECT * FROM cashflow.forecast_scenarios ORDER BY created_at DESC LIMIT 50"),
+                text("SELECT * FROM forecast_scenarios ORDER BY created_at DESC LIMIT 50"),
             ).mappings().all()
-            return {row["scenario_id"]: ForecastScenario.model_validate(dict(row)) for row in rows}
+            return {row["scenario_id"]: ForecastScenario.model_validate(_clean(dict(row), ForecastScenario)) for row in rows}
 
 
 
@@ -687,7 +853,7 @@ class PostgresRepository:
     def forecast_inputs(self) -> Dict[str, ForecastInput]:
         with get_db_session() as session:
             rows = session.execute(
-                text("SELECT forecast_run_id, input_snapshot FROM cashflow.forecast_runs WHERE input_snapshot != '{}'::jsonb ORDER BY created_at DESC LIMIT 50"),
+                text("SELECT forecast_run_id, input_snapshot FROM forecast_runs WHERE input_snapshot != '{}' ORDER BY created_at DESC LIMIT 50"),
             ).mappings().all()
             result = {}
             for row in rows:
@@ -705,10 +871,10 @@ class PostgresRepository:
     def obligations(self) -> Dict[str, List[RecurringObligation]]:
         with get_db_session() as session:
             rows = session.execute(
-                text("SELECT * FROM cashflow.recurring_obligations ORDER BY created_at DESC"),
+                text("SELECT * FROM recurring_obligations ORDER BY created_at DESC"),
             ).mappings().all()
             result: Dict[str, List[RecurringObligation]] = {}
             for row in rows:
-                ob = RecurringObligation.model_validate(dict(row))
+                ob = RecurringObligation.model_validate(_clean(dict(row), RecurringObligation))
                 result.setdefault(ob.org_id, []).append(ob)
             return result

@@ -13,7 +13,7 @@ from cashflow_os.domain.models import ParsedImportBundle, SourceType
 from cashflow_os.ingestion.errors import FileParseError
 from cashflow_os.ingestion.parsers.manual_template import parse_manual_csv, parse_manual_workbook
 from cashflow_os.ingestion.parsers.tally_export import parse_tally_file
-from cashflow_os.ingestion.parsers.zoho_export import parse_zoho_payload
+
 
 __all__ = ["FileParseError", "parse_import"]
 
@@ -28,8 +28,6 @@ def parse_import(
     source_hint: Optional[str] = None,
 ) -> ParsedImportBundle:
     try:
-        if source_type == SourceType.ZOHO_EXPORT:
-            return parse_zoho_payload(org_id=org_id, filename=filename, payload=payload or {})
 
         if source_type == SourceType.TALLY_EXPORT:
             return parse_tally_file(

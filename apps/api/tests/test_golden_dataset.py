@@ -149,12 +149,16 @@ class TestGoldenDatasetReports:
         assert len(report.charts) >= 8
         assert len(report.sections) >= 3
 
-    def test_pdf_export_not_empty(self, demo_run: ForecastRun):
+    def test_pdf_export_not_empty(self, demo_run: ForecastRun, tmp_path):
         report = build_report_pack(demo_run)
-        pdf_bytes = export_pdf(demo_run, report)
-        assert len(pdf_bytes) > 1000
+        out = tmp_path / "test.pdf"
+        export_pdf(demo_run, report, out)
+        assert out.exists()
+        assert out.stat().st_size > 1000
 
-    def test_excel_export_not_empty(self, demo_run: ForecastRun):
+    def test_excel_export_not_empty(self, demo_run: ForecastRun, tmp_path):
         report = build_report_pack(demo_run)
-        xlsx_bytes = export_excel(demo_run, report)
-        assert len(xlsx_bytes) > 1000
+        out = tmp_path / "test.xlsx"
+        export_excel(demo_run, report, out)
+        assert out.exists()
+        assert out.stat().st_size > 1000
